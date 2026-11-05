@@ -1,0 +1,19 @@
+# Flutter / Dart / Gradle build artifacts
+/build/
+/.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+/android/.gradle/
+/android/captures/
+/android/local.properties
+*.iml
+*.ipr
+*.iws
+.idea/
+.DS_Store
+*.apk
+
+# Always track bundled JNI native libraries & offline TinyML wake-word models
+!android/app/src/main/jniLibs/**/*.so
+!assets/models/kws/**
