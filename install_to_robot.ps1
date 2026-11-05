@@ -1,6 +1,20 @@
 param(
-    [string]$ApkPath = "E:\MTC\APK\MinaRobot\build\app\outputs\flutter-apk\app-release.apk"
+    [string]$ApkPath = ""
 )
+
+if ([string]::IsNullOrWhiteSpace($ApkPath)) {
+    $candidates = @(
+        "E:\MTC\APK\MinaRobot\Mina_AI_v1.1.0_release.apk",
+        "E:\MTC\APK\MinaRobot\app-release.apk",
+        "E:\MTC\APK\MinaRobot\build\app\outputs\flutter-apk\app-release.apk"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $ApkPath = $c; break }
+    }
+    if ([string]::IsNullOrWhiteSpace($ApkPath)) {
+        $ApkPath = $candidates[0]
+    }
+}
 
 $adb = "C:\platform-tools\adb.exe"
 if (-not (Test-Path $adb)) {
