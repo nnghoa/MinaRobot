@@ -222,7 +222,9 @@ class _MinaHomeScreenState extends State<MinaHomeScreen> {
       ),
       child: Text(
         ok
-            ? 'UART ${_brain.robotDriver.portPath}@${_brain.robotDriver.baudrate}'
+            ? (_brain.robotDriver.isUsbMode
+                ? 'USB OTG @${_brain.robotDriver.baudrate}'
+                : 'UART ${_brain.robotDriver.portPath}@${_brain.robotDriver.baudrate}')
             : 'UART Mô phỏng',
         style: TextStyle(
           color: ok ? const Color(0xFF00E5FF) : Colors.white38,

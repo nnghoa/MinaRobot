@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../robot/robonova_actions.dart';
+import '../robot/robonova_serial_driver.dart';
 import '../services/xiaozhi_session_service.dart';
 
 /// Ngăn kéo cấu hình phần cứng UART, ghép nối XiaoZhi & bàn phím test trực tiếp 63 động tác MR-C3024FX
@@ -388,9 +389,14 @@ class _MinaControlDrawerState extends State<MinaControlDrawer>
                 value: _selectedPort,
                 dropdownColor: const Color(0xFF1E293B),
                 style: const TextStyle(color: Colors.white),
-                decoration: _inputDeco('Cổng Serial (Board A33)'),
+                decoration: _inputDeco('Cổng Serial'),
                 items: _ports
-                    .map((p) => DropdownMenuItem(value: p, child: Text(p)))
+                    .map((p) => DropdownMenuItem(
+                          value: p,
+                          child: Text(p == RobonovaSerialDriver.usbPortName
+                              ? 'USB OTG (CP2102/CH340)'
+                              : p),
+                        ))
                     .toList(),
                 onChanged: (v) {
                   if (v != null) setState(() => _selectedPort = v);
@@ -430,7 +436,9 @@ class _MinaControlDrawerState extends State<MinaControlDrawer>
                   SnackBar(
                     content: Text(ok
                         ? 'Đã mở cổng $_selectedPort @ $_selectedBaud baud thành công!'
-                        : 'Không mở được $_selectedPort (Kiểm tra dây UART / quyền root).'),
+                        : (_selectedPort == RobonovaSerialDriver.usbPortName
+                            ? 'Chưa mở được USB OTG: ${widget.controller.robotDriver.usbStatus}'
+                            : 'Không mở được $_selectedPort (Kiểm tra dây UART / quyền root).')),
                   ),
                 );
                 setState(() {});

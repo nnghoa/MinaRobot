@@ -29,7 +29,11 @@ class MainActivity : FlutterActivity() {
         private const val AUDIO_METHOD_CHANNEL = "com.mtc.mina_robot/audio"
         private const val MIC_STREAM_CHANNEL = "com.mtc.mina_robot/mic_stream"
         private const val HARDWARE_CHANNEL = "com.mtc.mina_robot/hardware"
+        private const val USB_SERIAL_CHANNEL = "com.mtc.mina_robot/usb_serial"
+        private const val USB_SERIAL_EVENTS = "com.mtc.mina_robot/usb_serial_events"
     }
+
+    private var usbSerial: UsbSerialBridge? = null
 
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -155,6 +159,37 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(true)
                     }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // 4. Cổng serial qua USB OTG (CP2102 / CH340...) cho điện thoại Android nối mạch MR-C3024FX
+        val usb = UsbSerialBridge(applicationContext)
+        usbSerial = usb
+        EventChannel(flutterEngine.dartExecutor.binaryMessenger, USB_SERIAL_EVENTS)
+            .setStreamHandler(object : EventChannel.StreamHandler {
+                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                    usb.setEventSink(events)
+                }
+
+                override fun onCancel(arguments: Any?) {
+                    usb.setEventSink(null)
+                }
+            })
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, USB_SERIAL_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "list" -> result.success(usb.listDevices())
+                    "open" -> usb.open(call.argument<Int>("baudrate") ?: 9600, result)
+                    "write" -> {
+                        val bytes = call.argument<ByteArray>("bytes")
+                        result.success(bytes != null && usb.write(bytes))
+                    }
+                    "close" -> {
+                        usb.close()
+                        result.success(true)
+                    }
+                    "isOpen" -> result.success(usb.isOpen)
                     else -> result.notImplemented()
                 }
             }
@@ -397,6 +432,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        usbSerial?.dispose()
+        usbSerial = null
         stopMicCapture()
         stopPcmPlayerInternal()
         try {

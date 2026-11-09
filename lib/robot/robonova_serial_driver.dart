@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ffi' as ffi;
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart';
@@ -43,8 +44,13 @@ typedef _TcsetattrDart = int Function(int fd, int optionalActions, ffi.Pointer<f
 /// - Chiều RX (MR-C3024FX ETX -> Android RX): nhận khung nhị phân 8 byte [0xAA, 0x55, SonarHi, SonarLo, Dist10k, Batt, Tilt, Chk]
 class RobonovaSerialDriver {
   static const MethodChannel _hwChannel = MethodChannel('com.mtc.mina_robot/hardware');
+  static const MethodChannel _usbChannel = MethodChannel('com.mtc.mina_robot/usb_serial');
+  static const EventChannel _usbEvents = EventChannel('com.mtc.mina_robot/usb_serial_events');
   static const String _prefPortKey = 'mina_uart_port';
   static const String _prefBaudKey = 'mina_uart_baud';
+
+  /// Tên cổng đặc biệt: dùng mạch USB-UART (CP2102 / CH340...) cắm qua cáp OTG của điện thoại
+  static const String usbPortName = 'usb';
 
   // Mã lệnh mở rộng gửi xuống ERX 9600 trên mạch Robonova-II
   static const int cmdRequestSensors = 115; // 's'
@@ -72,6 +78,12 @@ class RobonovaSerialDriver {
   int _fd = -1;
   String _portPath = '/dev/ttyS1';
   int _baudrate = 9600; // MR-C3024FX chạy lệnh `ERX 9600` & `ETX 9600` ở tốc độ chuẩn 9600 baud!
+
+  // Chế độ USB OTG (điện thoại Android + mạch CP2102/CH340)
+  bool _usbMode = false;
+  bool _usbOpen = false;
+  String _usbStatus = '';
+  StreamSubscription<dynamic>? _usbSub;
 
   final List<int> _rxBuf = <int>[];
   Timer? _rxPollTimer;
@@ -117,7 +129,11 @@ class RobonovaSerialDriver {
 
   String get portPath => _portPath;
   int get baudrate => _baudrate;
-  bool get isConnected => _fd >= 0;
+  bool get isConnected => _fd >= 0 || (_usbMode && _usbOpen);
+  bool get isUsbMode => _usbMode;
+
+  /// Thông báo trạng thái gần nhất của cổng USB OTG (để hiển thị cho người dùng)
+  String get usbStatus => _usbStatus;
   RobonovaSensorState get sensorState => _sensorState;
 
   void updateThresholds({
@@ -133,17 +149,75 @@ class RobonovaSerialDriver {
 
   Future<void> initFromPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    _portPath = prefs.getString(_prefPortKey) ?? '/dev/ttyS1';
+    // Điện thoại Android thường không có /dev/ttyS1 -> mặc định dùng USB OTG (CP2102/CH340)
+    final defaultPort = File('/dev/ttyS1').existsSync() ? '/dev/ttyS1' : usbPortName;
+    _portPath = prefs.getString(_prefPortKey) ?? defaultPort;
     _baudrate = prefs.getInt(_prefBaudKey) ?? 9600;
     await openPort(_portPath, _baudrate);
   }
 
   Future<List<String>> listAvailablePorts() async {
+    final ports = <String>[usbPortName];
     try {
       final res = await _hwChannel.invokeListMethod<String>('listSerialPorts');
-      if (res != null && res.isNotEmpty) return res;
+      if (res != null && res.isNotEmpty) return [...ports, ...res];
     } catch (_) {}
-    return const ['/dev/ttyS1', '/dev/ttyS0', '/dev/ttyS2', '/dev/ttyS3', '/dev/ttyUSB0'];
+    return [...ports, '/dev/ttyS1', '/dev/ttyS0', '/dev/ttyS2', '/dev/ttyS3', '/dev/ttyUSB0'];
+  }
+
+  /// Danh sách mạch USB-serial đang cắm qua OTG (ví dụ "Cp21xx (10C4:EA60)")
+  Future<List<String>> listUsbDevices() async {
+    try {
+      return await _usbChannel.invokeListMethod<String>('list') ?? const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  void _ensureUsbEvents() {
+    _usbSub ??= _usbEvents.receiveBroadcastStream().listen((dynamic evt) {
+      if (evt is! Map) return;
+      final type = evt['type'];
+      if (type == 'data') {
+        final bytes = evt['bytes'];
+        if (bytes is Uint8List) {
+          _consumeRxBytes(bytes.map((b) => b & 0xFF).toList());
+        }
+      } else if (type == 'status') {
+        final wasOpen = _usbOpen;
+        _usbOpen = evt['open'] == true;
+        _usbStatus = evt['message']?.toString() ?? '';
+        onLog?.call('USB', _usbStatus);
+        // Cắm lại cáp OTG -> tự đồng bộ lại chế độ phản xạ và lấy cảm biến
+        if (_usbMode && _usbOpen && !wasOpen) {
+          _startTelemetryLoops();
+          _writeSingleByte(_desiredHwReflex ? cmdEnableHwReflex : cmdDisableHwReflex);
+          _lastTxAt = DateTime.now();
+        }
+      }
+    }, onError: (_) {});
+  }
+
+  Future<bool> _openUsb(int baudrate) async {
+    _usbMode = true;
+    _ensureUsbEvents();
+    bool ok = false;
+    try {
+      ok = await _usbChannel.invokeMethod<bool>('open', {'baudrate': baudrate}) ?? false;
+    } catch (e) {
+      onLog?.call('USB', 'Lỗi mở USB-serial: $e');
+    }
+    _usbOpen = ok;
+    _rxBuf.clear();
+    _startTelemetryLoops();
+    if (ok) {
+      onLog?.call('UART', 'Đã kết nối USB OTG @ $baudrate baud (CP2102/CH340 -> MR-C3024FX)');
+      _writeSingleByte(_desiredHwReflex ? cmdEnableHwReflex : cmdDisableHwReflex);
+      _lastTxAt = DateTime.now();
+    } else {
+      onLog?.call('UART', 'Chưa mở được USB OTG. Cắm mạch CP2102 qua cáp OTG rồi bấm Cho phép.');
+    }
+    return ok;
   }
 
   Future<bool> openPort(String path, int baudrate) async {
@@ -154,6 +228,11 @@ class RobonovaSerialDriver {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_prefPortKey, path);
     await prefs.setInt(_prefBaudKey, baudrate);
+
+    if (path == usbPortName) {
+      return _openUsb(baudrate);
+    }
+    _usbMode = false;
 
     if (!_ffiReady) return false;
 
@@ -210,7 +289,7 @@ class RobonovaSerialDriver {
 
     // Định kỳ hỏi cảm biến ('s' = 115) mỗi 1200ms khi robot đang rảnh (không bận múa/đi)
     _sensorRequestTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
-      if (_fd >= 0 && DateTime.now().isAfter(_busyUntil)) {
+      if (isConnected && DateTime.now().isAfter(_busyUntil)) {
         _writeSingleByte(cmdRequestSensors);
         _lastTxAt = DateTime.now();
       }
@@ -291,7 +370,7 @@ class RobonovaSerialDriver {
     Duration waitTimeout = const Duration(milliseconds: 180),
   }) async {
     // Khi robot đang bận thực hiện động tác, MR-C3024FX không đọc ERX -> trả về số liệu gần nhất
-    if (_fd >= 0 && _ffiReady && DateTime.now().isAfter(_busyUntil)) {
+    if (isConnected && DateTime.now().isAfter(_busyUntil)) {
       _writeSingleByte(cmdRequestSensors);
       _lastTxAt = DateTime.now();
       final deadline = DateTime.now().add(waitTimeout);
@@ -371,6 +450,17 @@ class RobonovaSerialDriver {
   }
 
   bool _writeSingleByte(int byteVal) {
+    if (_usbMode) {
+      if (!_usbOpen) return false;
+      // Kênh MethodChannel giữ đúng thứ tự gửi; ghi 1 byte ở 9600 baud mất ~1ms
+      _usbChannel.invokeMethod<bool>('write', {
+        'bytes': Uint8List.fromList([byteVal & 0xFF]),
+      }).catchError((Object e) {
+        onLog?.call('USB', 'Lỗi ghi byte $byteVal: $e');
+        return false;
+      });
+      return true;
+    }
     if (_fd < 0 || !_ffiReady) return false;
     final ptr = calloc<ffi.Uint8>(1);
     try {
@@ -423,6 +513,10 @@ class RobonovaSerialDriver {
     _sensorRequestTimer?.cancel();
     _sensorRequestTimer = null;
     _rxBuf.clear();
+    if (_usbMode && _usbOpen) {
+      _usbChannel.invokeMethod('close').catchError((_) => null);
+    }
+    _usbOpen = false;
     if (_fd >= 0 && _ffiReady) {
       _close(_fd);
       _fd = -1;

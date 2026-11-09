@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
     <application
         android:label="Mina AI"
         android:name="${applicationName}"
@@ -33,6 +35,13 @@
                 <!-- Cho phép đặt Mina làm màn hình chính (Launcher) của Robot nếu muốn -->
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- Tự mở Mina và cấp quyền khi cắm mạch USB-UART (CP2102/CH340) qua cáp OTG -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
         </activity>
 
         <meta-data

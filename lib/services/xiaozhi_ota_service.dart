@@ -97,7 +97,7 @@ class XiaozhiOtaService {
       'minimum_free_heap_size': 8388608,
       'mac_address': mac,
       'uuid': clientId,
-      'chip_model_name': 'Allwinner-A33',
+      'chip_model_name': 'Android-USB-OTG',
       'application': {
         'name': 'mina-robot',
         'version': '1.0.0',

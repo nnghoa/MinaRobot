@@ -100,7 +100,7 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   Future<void> initializeAll() async {
-    _addLog('SYSTEM', 'Khởi tạo Mina AI v1.1.0 (Tích hợp Cảm biến Robonova-II)...');
+    _addLog('SYSTEM', 'Khởi tạo Mina AI v1.2.0 (Tích hợp Cảm biến Robonova-II)...');
     await _loadSensorPrefs();
     opusCodec.init(encodeSampleRate: 16000, decodeSampleRate: 24000);
     await audioService.initPlayer(24000);
