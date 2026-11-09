@@ -1,7 +1,9 @@
 package com.mtc.mina_robot
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -39,6 +41,24 @@ class MainActivity : FlutterActivity() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+
+    private val robotCmdReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != "com.mtc.mina_visbot.ROBOT_CMD") return
+            if (!VisbotMotorController.isInitialized && context != null) {
+                VisbotMotorController.init(context)
+            }
+            val moveDir = intent.getStringExtra("move")
+            val headAct = intent.getStringExtra("head")
+            val dur = intent.getLongExtra("durationMs", 1500L)
+            if (!moveDir.isNullOrEmpty()) {
+                android.util.Log.i("VisbotMotor", "Broadcast move($moveDir) -> " + VisbotMotorController.move(moveDir, dur))
+            }
+            if (!headAct.isNullOrEmpty()) {
+                android.util.Log.i("VisbotMotor", "Broadcast head($headAct) -> " + VisbotMotorController.head(headAct))
+            }
+        }
+    }
 
     // Thu âm 16kHz Mono PCM 16-bit (chuẩn chung cho cả Sherpa-ONNX và XiaoZhi Opus)
     private val isRecording = AtomicBoolean(false)
@@ -80,6 +100,10 @@ class MainActivity : FlutterActivity() {
 
         // Khởi tạo bộ điều khiển động cơ bánh xe & servo cổ UBTECH Visbot
         VisbotMotorController.init(this)
+        try {
+            registerReceiver(robotCmdReceiver, IntentFilter("com.mtc.mina_visbot.ROBOT_CMD"))
+        } catch (_: Throwable) {
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -603,6 +627,10 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(robotCmdReceiver)
+        } catch (_: Throwable) {
+        }
         stopMicCapture()
         stopPcmPlayerInternal()
         mediaStop()
