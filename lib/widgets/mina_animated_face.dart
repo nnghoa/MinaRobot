@@ -109,8 +109,8 @@ class _MinaFacePainter extends CustomPainter {
     final gazeY = math.cos(progress * math.pi * 4) * (eyeH * 0.03);
 
     final glowPaint = Paint()
-      ..color = _primaryColor.withOpacity(0.28)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 26);
+      ..color = _primaryColor.withOpacity(0.16)
+      ..style = PaintingStyle.fill;
 
     final eyePaint = Paint()
       ..color = _primaryColor
@@ -152,8 +152,9 @@ class _MinaFacePainter extends CustomPainter {
   }) {
     final rect = Rect.fromCenter(center: center, width: width, height: height);
     final rrect = RRect.fromRectAndRadius(rect, Radius.circular(width * 0.36));
+    final glowRRect = RRect.fromRectAndRadius(rect.inflate(7.0), Radius.circular(width * 0.42));
 
-    canvas.drawRRect(rrect, glowPaint);
+    canvas.drawRRect(glowRRect, glowPaint);
 
     if (emotion == MinaEmotion.happy) {
       // Mắt cười cong hình vòm ^ ^
@@ -269,5 +270,13 @@ class _MinaFacePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _MinaFacePainter oldDelegate) => true;
+  bool shouldRepaint(covariant _MinaFacePainter oldDelegate) {
+    if (oldDelegate.emotion != emotion || oldDelegate.status != status) return true;
+    final activeVoice =
+        status == MinaVoiceStatus.aiSpeaking || status == MinaVoiceStatus.listeningUser;
+    final isBlinking = progress > 0.92 || oldDelegate.progress > 0.92;
+    // Khi đang nói/nghe hoặc đang chớp mắt: ~25 FPS (100 bước / 4s). Khi nghỉ: ~10 FPS (40 bước / 4s)
+    final steps = (activeVoice || isBlinking) ? 100 : 40;
+    return (progress * steps).floor() != (oldDelegate.progress * steps).floor();
+  }
 }

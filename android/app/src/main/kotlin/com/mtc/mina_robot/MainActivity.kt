@@ -456,24 +456,17 @@ class MainActivity : FlutterActivity() {
 
         // 1920 bytes = 960 mẫu = 1 khung 60ms ở 16kHz (chuẩn Opus XiaoZhi)
         val frameBytes = 1920
-        val bufferSize = maxOf(minBuf * 2, frameBytes * 4)
+        val bufferSize = maxOf(minBuf * 4, frameBytes * 12)
 
         val record = try {
-            AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate, channelConfig, audioFormat, bufferSize)
-        } catch (_: Throwable) {
             AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, channelConfig, audioFormat, bufferSize)
+        } catch (_: Throwable) {
+            AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate, channelConfig, audioFormat, bufferSize)
         }
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
             return false
-        }
-
-        // Khử vọng & lọc ồn phần cứng nếu có
-        try {
-            if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(record.audioSessionId)?.enabled = true
-            if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(record.audioSessionId)?.enabled = true
-        } catch (_: Throwable) {
         }
 
         try {
@@ -490,6 +483,7 @@ class MainActivity : FlutterActivity() {
 
         audioRecord = record
         isRecording.set(true)
+        val pendingMicPosts = AtomicBoolean(false)
 
         recordThread = Thread({
             val buf = ByteArray(frameBytes)
@@ -500,12 +494,18 @@ class MainActivity : FlutterActivity() {
                     if (read > 0) offset += read else break
                 }
                 if (offset == frameBytes && isRecording.get()) {
-                    val copy = buf.copyOf()
-                    mainHandler.post { micEventSink?.success(copy) }
+                    // Chống dồn ứ hàng đợi Main Looper nếu UI thread đang bận
+                    if (pendingMicPosts.compareAndSet(false, true)) {
+                        val copy = buf.copyOf()
+                        mainHandler.post {
+                            pendingMicPosts.set(false)
+                            micEventSink?.success(copy)
+                        }
+                    }
                 }
             }
         }, "MinaMicThread").apply {
-            priority = Thread.MAX_PRIORITY
+            priority = Thread.NORM_PRIORITY + 1
             start()
         }
         return true
