@@ -7,59 +7,47 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../mcp/mina_mcp_server.dart';
+import '../models/assistant_profile.dart';
 import '../models/mina_state.dart';
-import '../robot/robonova_actions.dart';
-import '../robot/robonova_serial_driver.dart';
 import 'mina_audio_service.dart';
+import 'mina_platform.dart';
 import 'mina_wake_word_service.dart';
 import 'opus_codec_ffi.dart';
 import 'xiaozhi_ota_service.dart';
 
-/// Điều phối viên trung tâm của Robot Mina:
-/// - Standby lắng nghe từ khóa "Mina" / "Chào Mina" / "Mina ơi" bằng Sherpa-ONNX Offline
-/// - Đàm thoại thời gian thực hai chiều qua WebSocket XiaoZhi + Opus
-/// - Xử lý lệnh MCP điều khiển toàn bộ 63 động tác & đọc cảm biến siêu âm / 10k trên mạch MR-C3024FX
+/// Điều phối viên trung tâm của Mina Visbot:
+/// - Chờ từ khóa "Mina" / "Chào Mina" / "Mina ơi" bằng Sherpa-ONNX offline
+/// - Đàm thoại hai chiều qua WebSocket XiaoZhi + Opus
+/// - Nhiều trợ lý (Mina, gia sư Toán/Văn/Tiếng Anh, kể chuyện), mỗi trợ lý một thiết bị XiaoZhi riêng
+/// - Tự giảm/tạm dừng radio khi đang nói chuyện, phát tiếp khi xong
 class MinaBrainController extends ChangeNotifier {
-  static const String _prefHwReflex = 'mina_hw_reflex';
-  static const String _prefSafeWalk = 'mina_safe_walk';
-  static const String _prefAutoGreetSonar = 'mina_auto_greet_sonar';
-  static const String _prefAutoStandup = 'mina_auto_standup';
-  static const String _prefSonarLimit = 'mina_sonar_limit_cm';
-  static const String _prefDist10kLimit = 'mina_dist10k_limit';
+  static const String _prefActiveAssistant = 'mina_active_assistant';
 
   final MinaAudioService audioService = MinaAudioService();
   final XiaozhiOtaService otaService = XiaozhiOtaService();
   final MinaOpusCodec opusCodec = MinaOpusCodec();
 
-  late final RobonovaSerialDriver robotDriver;
   late final MinaWakeWordService wakeWordService;
   late final MinaMcpServer mcpServer;
 
   MinaEmotion _emotion = MinaEmotion.idle;
   MinaVoiceStatus _status = MinaVoiceStatus.initializing;
-  String _subtitle = 'Đang khởi động hệ thống thần kinh của Mina...';
+  String _subtitle = 'Mina đang khởi động...';
   String _lastUserSpeech = '';
   String? _pairingCode;
   String _deviceMac = '';
+  String _clientId = '';
+  String _activeAssistantId = AssistantCatalog.defaultId;
+  final Map<String, String?> _pairingByAssistant = {};
   final List<MinaLogEntry> _logs = [];
-
-  // Cấu hình phản xạ thông minh từ cảm biến trên Robonova-II
-  bool _hardwareReflexEnabled = true;
-  bool _obstacleSafeWalk = true;
-  bool _autoGreetOnSonar = true;
-  bool _autoStandupOnFall = false;
-  int _sonarThresholdCm = 25;
-  int _dist10kThreshold = 85;
-  int _personInFrontHits = 0;
-  bool _sonarSawClearSinceGreet = true; // Chỉ chào khi có người "tiến lại gần" (tránh chào mãi một bức tường)
-  DateTime _lastAutoGreetAt = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastFallRecoveryAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   WebSocket? _ws;
   String _sessionId = '';
   bool _sendingMicOpus = false;
+  bool _mediaPausedByMina = false;
+  bool _endSessionAfterTts = false;
+  Timer? _endSessionFallback;
   StreamSubscription<Uint8List>? _micSub;
-  Timer? _idleResetTimer;
 
   MinaEmotion get emotion => _emotion;
   MinaVoiceStatus get status => _status;
@@ -68,49 +56,45 @@ class MinaBrainController extends ChangeNotifier {
   String? get pairingCode => _pairingCode;
   String get deviceMac => _deviceMac;
   List<MinaLogEntry> get logs => List.unmodifiable(_logs);
+  AssistantProfile get activeAssistant => AssistantCatalog.byId(_activeAssistantId);
 
-  RobonovaSensorState get sensorState => robotDriver.sensorState;
-  bool get hardwareReflexEnabled => _hardwareReflexEnabled;
-  bool get obstacleSafeWalk => _obstacleSafeWalk;
-  bool get autoGreetOnSonar => _autoGreetOnSonar;
-  bool get autoStandupOnFall => _autoStandupOnFall;
-  int get sonarThresholdCm => _sonarThresholdCm;
-  int get dist10kThreshold => _dist10kThreshold;
+  /// Mã ghép nối đã biết của từng trợ lý (null = đã ghép nối hoặc chưa kiểm tra)
+  Map<String, String?> get pairingByAssistant => Map.unmodifiable(_pairingByAssistant);
 
   MinaBrainController() {
-    robotDriver = RobonovaSerialDriver(
-      onLog: _addLog,
-      onSensorUpdated: _handleSensorTelemetry,
-    );
     wakeWordService = MinaWakeWordService(
       onWakeWordDetected: _handleWakeWordTriggered,
       onLog: _addLog,
     );
     mcpServer = MinaMcpServer(
-      robotDriver: robotDriver,
       audioService: audioService,
       onEmotionChanged: (emo) {
         _emotion = emo;
         notifyListeners();
       },
-      isObstacleSafeWalkEnabled: () => _obstacleSafeWalk,
-      onUpdateSafetyConfig: updateSafetyConfig,
+      onSwitchAssistant: (id) => switchAssistant(id, startTalking: true),
+      onMediaStarted: _onMediaStartedByTool,
+      deviceMac: () => _deviceMac,
+      clientId: () => _clientId,
+      activeAssistantId: () => _activeAssistantId,
       onLog: _addLog,
     );
   }
 
   Future<void> initializeAll() async {
-    _addLog('SYSTEM', 'Khởi tạo Mina AI v1.1.0 (Tích hợp Cảm biến Robonova-II)...');
-    await _loadSensorPrefs();
+    _addLog('SYSTEM', 'Khởi tạo Mina Visbot v${XiaozhiOtaService.appVersion}...');
+    final prefs = await SharedPreferences.getInstance();
+    _activeAssistantId = AssistantCatalog.byId(prefs.getString(_prefActiveAssistant)).id;
+
     opusCodec.init(encodeSampleRate: 16000, decodeSampleRate: 24000);
     await audioService.initPlayer(24000);
-    // Ghi nhớ trạng thái phản xạ mong muốn TRƯỚC khi mở cổng; openPort() sẽ tự gửi 'm'/'n' xuống MR-C3024FX
-    robotDriver.setHardwareAutoReflex(_hardwareReflexEnabled);
-    await robotDriver.initFromPrefs();
 
     final kwsOk = await wakeWordService.init();
     final micOk = await audioService.startMic();
-    _addLog('AUDIO', 'Trạng thái Mic 16kHz: $micOk | Sherpa-ONNX KWS: $kwsOk');
+    _addLog('AUDIO', 'Mic 16kHz: $micOk | Sherpa-ONNX KWS: $kwsOk');
+    if (!micOk) {
+      _addLog('AUDIO', 'Không mở được mic. Có thể ứng dụng giọng nói gốc của Visbot đang giữ mic.');
+    }
 
     _micSub = audioService.pcm16kFrames.listen(_onPcmFrameFromMic);
 
@@ -118,140 +102,59 @@ class MinaBrainController extends ChangeNotifier {
     _enterWakeWordStandby();
   }
 
-  Future<void> _loadSensorPrefs() async {
+  /// Đổi trợ lý đang hoạt động. Nếu [startTalking] = true thì kết nối và để trợ lý mới chào luôn.
+  Future<void> switchAssistant(String id, {bool startTalking = false}) async {
+    final target = AssistantCatalog.byId(id);
+    _addLog('ASSISTANT', 'Chuyển sang ${target.name}');
+    await closeVoiceSession();
+    _activeAssistantId = target.id;
     final prefs = await SharedPreferences.getInstance();
-    _hardwareReflexEnabled = prefs.getBool(_prefHwReflex) ?? true;
-    _obstacleSafeWalk = prefs.getBool(_prefSafeWalk) ?? true;
-    _autoGreetOnSonar = prefs.getBool(_prefAutoGreetSonar) ?? true;
-    // Mặc định TẮT: chương trình gốc đã comment `GOSUB robot_tilt`, chân AD(5) có thể chưa cắm cảm biến nghiêng
-    _autoStandupOnFall = prefs.getBool(_prefAutoStandup) ?? false;
-    _sonarThresholdCm = prefs.getInt(_prefSonarLimit) ?? 25;
-    _dist10kThreshold = prefs.getInt(_prefDist10kLimit) ?? 85;
-    robotDriver.updateThresholds(
-      sonarThresholdCm: _sonarThresholdCm,
-      dist10kThreshold: _dist10kThreshold,
-    );
-  }
-
-  Future<void> updateSafetyConfig({
-    bool? hardwareReflex,
-    bool? obstacleSafeWalk,
-    bool? autoGreet,
-    bool? autoStandup,
-    int? sonarThresholdCm,
-    int? dist10kThreshold,
-  }) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (hardwareReflex != null) {
-      _hardwareReflexEnabled = hardwareReflex;
-      await prefs.setBool(_prefHwReflex, hardwareReflex);
-      robotDriver.setHardwareAutoReflex(hardwareReflex);
-    }
-    if (obstacleSafeWalk != null) {
-      _obstacleSafeWalk = obstacleSafeWalk;
-      await prefs.setBool(_prefSafeWalk, obstacleSafeWalk);
-    }
-    if (autoGreet != null) {
-      _autoGreetOnSonar = autoGreet;
-      await prefs.setBool(_prefAutoGreetSonar, autoGreet);
-    }
-    if (autoStandup != null) {
-      _autoStandupOnFall = autoStandup;
-      await prefs.setBool(_prefAutoStandup, autoStandup);
-    }
-    if (sonarThresholdCm != null) {
-      _sonarThresholdCm = sonarThresholdCm;
-      await prefs.setInt(_prefSonarLimit, sonarThresholdCm);
-    }
-    if (dist10kThreshold != null) {
-      _dist10kThreshold = dist10kThreshold;
-      await prefs.setInt(_prefDist10kLimit, dist10kThreshold);
-    }
-    robotDriver.updateThresholds(
-      sonarThresholdCm: _sonarThresholdCm,
-      dist10kThreshold: _dist10kThreshold,
-    );
-    notifyListeners();
-  }
-
-  void _handleSensorTelemetry(RobonovaSensorState s) {
-    final now = DateTime.now();
-
-    // 1. Phản xạ tự đứng dậy khi cảm biến nghiêng AD(5) báo ngã ngửa / ngã sấp (cooldown 8 giây)
-    if (_autoStandupOnFall &&
-        (s.isFallenBack || s.isFallenFront) &&
-        now.difference(_lastFallRecoveryAt).inSeconds >= 8) {
-      _lastFallRecoveryAt = now;
-      _emotion = MinaEmotion.surprised;
-      final slug = s.isFallenBack ? 'stand_up_from_back' : 'stand_up_from_front';
-      final act = RobonovaActionCatalog.findBySlugOrId(slug);
-      _subtitle = s.isFallenBack
-          ? 'Ái chà! Mina bị ngã ngửa rồi, để Mina tự đứng dậy (K19) nhé!'
-          : 'Ối! Mina bị ngã sấp rồi, Mina tự chống tay đứng dậy (K25) đây!';
-      _addLog('REFLEX', 'Phát hiện ${s.postureLabel} (AD5=${s.tiltRaw}) -> Tự động gọi $slug');
-      if (act != null) {
-        // Android là nơi ra quyết định đứng dậy (firmware để CONST TILT_ON = 0 để tránh 2 bên cùng kích hoạt)
-        robotDriver.executeAction(act);
-      }
-      notifyListeners();
-      return;
-    }
-
-    // 2. Phản xạ chủ động vẫy tay & bắt chuyện khi mắt siêu âm SONAR(5) thấy người tiến lại gần (15..65 cm)
-    final sonar = s.sonarCm;
-    if (sonar == null || sonar > 90) {
-      _sonarSawClearSinceGreet = true;
-    }
-    if (_autoGreetOnSonar &&
-        _sonarSawClearSinceGreet &&
-        _status == MinaVoiceStatus.standbyWakeWord &&
-        sonar != null &&
-        sonar >= 15 &&
-        sonar <= 65) {
-      _personInFrontHits++;
-      if (_personInFrontHits >= 2 && now.difference(_lastAutoGreetAt).inSeconds >= 45) {
-        _personInFrontHits = 0;
-        _sonarSawClearSinceGreet = false;
-        _lastAutoGreetAt = now;
-        _emotion = MinaEmotion.happy;
-        _subtitle = 'Mắt siêu âm thấy có người ở cách ${s.sonarCm} cm! Xin chào nhé!';
-        _addLog('REFLEX', 'Mắt siêu âm phát hiện người (${s.sonarCm} cm) -> Vẫy tay K7 & Mở hội thoại');
-        final waveAct = RobonovaActionCatalog.findBySlugOrId('wave_arms');
-        if (waveAct != null) {
-          robotDriver.executeAction(waveAct);
-        }
-        startVoiceConversation(wakeWordText: 'Phát hiện người đứng trước mặt Mina');
-        return;
-      }
+    await prefs.setString(_prefActiveAssistant, target.id);
+    await refreshOtaStatus();
+    if (startTalking && _pairingCode == null) {
+      await startVoiceConversation(wakeWordText: 'Xin chào ${target.name}');
     } else {
-      _personInFrontHits = 0;
+      _enterWakeWordStandby();
     }
-
-    notifyListeners();
   }
 
   Future<void> refreshOtaStatus() async {
-    final ota = await otaService.checkOtaAndPairing();
+    final ota = await otaService.checkOtaAndPairing(_activeAssistantId);
     _deviceMac = ota.deviceMac;
-    _pairingCode = ota.activationCode;
-    if (_pairingCode != null && _pairingCode!.isNotEmpty) {
+    _clientId = ota.clientId;
+    _pairingCode = (ota.activationCode?.isNotEmpty ?? false) ? ota.activationCode : null;
+    _pairingByAssistant[_activeAssistantId] = _pairingCode;
+    if (_pairingCode != null) {
       _status = MinaVoiceStatus.pairingRequired;
-      _subtitle = 'Nhập mã $_pairingCode trên trang xiaozhi.me để kích hoạt Mina miễn phí!';
-      _addLog('OTA', 'Mã ghép nối XiaoZhi của Mina (MAC $_deviceMac): $_pairingCode');
+      _subtitle = '${activeAssistant.name}: nhập mã $_pairingCode trên xiaozhi.me';
+      _addLog('OTA', '${activeAssistant.name} (MAC $_deviceMac) cần ghép nối, mã: $_pairingCode');
     } else {
-      _addLog('OTA', 'Thiết bị Mina (MAC $_deviceMac) đã sẵn sàng kết nối XiaoZhi!');
+      _addLog('OTA', '${activeAssistant.name} (MAC $_deviceMac) đã sẵn sàng.');
     }
     notifyListeners();
   }
 
+  /// Kiểm tra trạng thái ghép nối của tất cả trợ lý (dùng cho màn hình Cài đặt).
+  Future<void> refreshAllPairing() async {
+    for (final a in AssistantCatalog.all) {
+      final ota = await otaService.checkOtaAndPairing(a.id);
+      _pairingByAssistant[a.id] =
+          (ota.activationCode?.isNotEmpty ?? false) ? ota.activationCode : null;
+      if (a.id == _activeAssistantId) {
+        _pairingCode = _pairingByAssistant[a.id];
+      }
+      notifyListeners();
+    }
+  }
+
   void _onPcmFrameFromMic(Uint8List pcmBytes) {
-    // 1. Khi ở chế độ chờ: đưa âm thanh vào Sherpa-ONNX để bắt từ khóa "Mina"
+    // 1. Chế độ chờ: đưa âm thanh vào Sherpa-ONNX để bắt từ khóa "Mina"
     if (_status == MinaVoiceStatus.standbyWakeWord || _status == MinaVoiceStatus.pairingRequired) {
       wakeWordService.feedPcm16(pcmBytes);
       return;
     }
 
-    // 2. Khi đang lắng nghe người dùng nói chuyện với AI: nén sang Opus và đẩy thẳng lên WebSocket
+    // 2. Đang nghe người dùng: nén Opus và gửi lên WebSocket
     if (_sendingMicOpus && _ws != null && _ws!.readyState == WebSocket.open) {
       final opusPacket = opusCodec.encodePcm16Frame(pcmBytes);
       if (opusPacket != null) {
@@ -262,16 +165,15 @@ class MinaBrainController extends ChangeNotifier {
 
   void _handleWakeWordTriggered(String keyword) {
     final cleanWord = keyword.replaceAll('@', '').replaceAll('_', ' ');
-    _subtitle = 'Dạ, Mina nghe đây! ($cleanWord)';
+    _subtitle = 'Dạ, ${activeAssistant.name} nghe đây!';
     _emotion = MinaEmotion.surprised;
     notifyListeners();
     startVoiceConversation(wakeWordText: cleanWord);
   }
 
-  /// Người dùng gọi "Mina" hoặc chạm vào màn hình khuôn mặt của Mina
+  /// Chạm vào khuôn mặt: bắt đầu nói chuyện / ngắt lời / kết thúc
   Future<void> onFaceTapped() async {
     if (_status == MinaVoiceStatus.aiSpeaking) {
-      // Barge-in: Ngắt lời AI để người dùng nói câu mới ngay lập tức
       await abortCurrentSpeechAndListen();
       return;
     }
@@ -282,27 +184,67 @@ class MinaBrainController extends ChangeNotifier {
     await startVoiceConversation();
   }
 
+  Future<void> _pauseMediaForConversation() async {
+    try {
+      final st = await MinaPlatform.mediaState();
+      if (st['playing'] == true) {
+        await MinaPlatform.mediaPause();
+        _mediaPausedByMina = true;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _resumeMediaAfterConversation() async {
+    if (!_mediaPausedByMina) return;
+    _mediaPausedByMina = false;
+    try {
+      await MinaPlatform.mediaResume();
+    } catch (_) {}
+  }
+
+  /// Công cụ MCP vừa bật radio/nhạc/YouTube: giữ media tạm dừng trong lúc AI nói câu xác nhận,
+  /// sau đó đóng phiên để media phát và mic không thu tiếng media.
+  Future<void> _onMediaStartedByTool() async {
+    await _pauseMediaForConversation();
+    _endSessionAfterTts = true;
+    _endSessionFallback?.cancel();
+    // Phòng trường hợp server không gửi tts stop
+    _endSessionFallback = Timer(const Duration(seconds: 12), () {
+      if (_endSessionAfterTts) {
+        _endSessionAfterTts = false;
+        closeVoiceSession();
+      }
+    });
+  }
+
   Future<void> startVoiceConversation({String? wakeWordText}) async {
     wakeWordService.setEnabled(false);
     _status = MinaVoiceStatus.connectingCloud;
     _emotion = MinaEmotion.thinking;
-    _subtitle = 'Mina đang kết nối...';
+    _subtitle = '${activeAssistant.name} đang kết nối...';
     notifyListeners();
 
-    final ota = await otaService.checkOtaAndPairing();
+    await _pauseMediaForConversation();
+
+    final ota = await otaService.checkOtaAndPairing(_activeAssistantId);
     _deviceMac = ota.deviceMac;
+    _clientId = ota.clientId;
     if (ota.activationCode != null && ota.activationCode!.isNotEmpty) {
       _pairingCode = ota.activationCode;
+      _pairingByAssistant[_activeAssistantId] = _pairingCode;
       _status = MinaVoiceStatus.pairingRequired;
       _emotion = MinaEmotion.happy;
-      _subtitle = 'Mã kích hoạt của Mina là: ${ota.activationCode} (nhập tại xiaozhi.me)';
+      _subtitle = 'Mã kích hoạt ${activeAssistant.name}: ${ota.activationCode} (nhập tại xiaozhi.me)';
       wakeWordService.setEnabled(true);
+      await _resumeMediaAfterConversation();
       notifyListeners();
       return;
     }
     _pairingCode = null;
+    _pairingByAssistant[_activeAssistantId] = null;
 
     await _disconnectSocketOnly();
+    mcpServer.resetSession();
 
     try {
       _addLog('WS', 'Kết nối tới ${ota.wsUrl}...');
@@ -316,20 +258,23 @@ class MinaBrainController extends ChangeNotifier {
         },
       ).timeout(const Duration(seconds: 10));
 
+      final thisSocket = _ws;
       _ws!.listen(
         _onSocketData,
         onDone: () {
+          // Bỏ qua sự kiện của socket cũ (ví dụ khi vừa chuyển trợ lý)
+          if (!identical(thisSocket, _ws) && _ws != null) return;
           _addLog('WS', 'Phiên đàm thoại kết thúc.');
           _enterWakeWordStandby();
         },
         onError: (Object err) {
+          if (!identical(thisSocket, _ws) && _ws != null) return;
           _addLog('WS', 'Lỗi WebSocket: $err');
           _enterWakeWordStandby();
         },
       );
 
-      // Gửi gói bắt tay Hello đăng ký chuẩn âm thanh Opus 16kHz + bật tính năng MCP Tools!
-      final helloMsg = {
+      _sendJson({
         'type': 'hello',
         'version': 1,
         'features': {
@@ -342,19 +287,18 @@ class MinaBrainController extends ChangeNotifier {
           'channels': 1,
           'frame_duration': 60,
         },
-      };
-      _sendJson(helloMsg);
+      });
     } catch (e) {
       _addLog('WS', 'Không kết nối được máy chủ giọng nói: $e');
       _status = MinaVoiceStatus.error;
-      _subtitle = 'Chưa kết nối được Wi-Fi/Server. Hãy gọi "Mina" để thử lại nhé!';
+      _subtitle = 'Chưa kết nối được mạng/server. Gọi "Mina" để thử lại nhé!';
       notifyListeners();
       Future<void>.delayed(const Duration(seconds: 3), _enterWakeWordStandby);
     }
   }
 
   Future<void> _onSocketData(dynamic data) async {
-    // 1. Khung âm thanh nhị phân Opus từ AI trả về -> Giải mã và phát loa tức thì
+    // 1. Âm thanh Opus từ AI -> giải mã và phát
     if (data is List<int>) {
       final opusBytes = data is Uint8List ? data : Uint8List.fromList(data);
       final pcm = opusCodec.decodeOpusPacket(opusBytes);
@@ -364,7 +308,7 @@ class MinaBrainController extends ChangeNotifier {
       return;
     }
 
-    // 2. Bản tin điều khiển JSON (hello, stt, llm, tts, mcp)
+    // 2. Bản tin JSON (hello, stt, llm, tts, mcp)
     if (data is! String) return;
     Map<String, dynamic> msg;
     try {
@@ -389,7 +333,7 @@ class MinaBrainController extends ChangeNotifier {
         final text = msg['text']?.toString() ?? '';
         if (text.isNotEmpty) {
           _lastUserSpeech = text;
-          _subtitle = 'Anh: "$text"';
+          _subtitle = 'Bạn: "$text"';
           _emotion = MinaEmotion.thinking;
           _sendingMicOpus = false;
           _addLog('STT', text);
@@ -418,12 +362,18 @@ class MinaBrainController extends ChangeNotifier {
           final text = msg['text']?.toString() ?? '';
           if (text.isNotEmpty) {
             _subtitle = text;
-            _addLog('MINA', text);
+            _addLog(activeAssistant.name.toUpperCase(), text);
             notifyListeners();
           }
         } else if (state == 'stop') {
-          // Chờ đuôi âm thanh trong hàng đợi phát hết rồi tự động nghe lượt tiếp theo (Continuous Chat)
+          // Chờ đuôi âm thanh phát hết rồi nghe lượt tiếp theo
           await Future<void>.delayed(const Duration(milliseconds: 450));
+          if (_endSessionAfterTts) {
+            _endSessionAfterTts = false;
+            _endSessionFallback?.cancel();
+            await closeVoiceSession();
+            break;
+          }
           if (_ws != null && _ws!.readyState == WebSocket.open) {
             _startListeningTurn();
           }
@@ -454,7 +404,7 @@ class MinaBrainController extends ChangeNotifier {
     if (_ws == null || _ws!.readyState != WebSocket.open) return;
     _status = MinaVoiceStatus.listeningUser;
     _emotion = MinaEmotion.listening;
-    _subtitle = 'Mina đang lắng nghe anh nói...';
+    _subtitle = '${activeAssistant.name} đang lắng nghe...';
     _sendingMicOpus = true;
     _sendJson({
       'session_id': _sessionId,
@@ -485,14 +435,14 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   void _enterWakeWordStandby() {
-    _idleResetTimer?.cancel();
     _sendingMicOpus = false;
     _status = _pairingCode != null ? MinaVoiceStatus.pairingRequired : MinaVoiceStatus.standbyWakeWord;
     _emotion = MinaEmotion.idle;
     if (_pairingCode == null) {
-      _subtitle = 'Gọi "Mina", "Chào Mina" hoặc chạm màn hình để trò chuyện';
+      _subtitle = 'Gọi "Mina" hoặc chạm màn hình để trò chuyện với ${activeAssistant.name}';
     }
     wakeWordService.setEnabled(true);
+    _resumeMediaAfterConversation();
     notifyListeners();
   }
 
@@ -523,10 +473,9 @@ class MinaBrainController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _idleResetTimer?.cancel();
+    _endSessionFallback?.cancel();
     _micSub?.cancel();
     _disconnectSocketOnly();
-    robotDriver.closePort();
     wakeWordService.dispose();
     opusCodec.dispose();
     audioService.dispose();

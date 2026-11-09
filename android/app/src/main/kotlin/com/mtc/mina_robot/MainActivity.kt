@@ -2,11 +2,17 @@ package com.mtc.mina_robot
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.SurfaceTexture
+import android.hardware.Camera
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
@@ -15,12 +21,13 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import java.io.File
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -28,7 +35,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val AUDIO_METHOD_CHANNEL = "com.mtc.mina_robot/audio"
         private const val MIC_STREAM_CHANNEL = "com.mtc.mina_robot/mic_stream"
-        private const val HARDWARE_CHANNEL = "com.mtc.mina_robot/hardware"
+        private const val PLATFORM_CHANNEL = "com.mtc.mina_robot/platform"
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -40,19 +47,27 @@ class MainActivity : FlutterActivity() {
     private var micEventSink: EventChannel.EventSink? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Phát âm thanh PCM thời gian thực từ XiaoZhi (mặc định 16kHz hoặc 24kHz Mono 16-bit)
+    // Phát âm thanh PCM thời gian thực từ XiaoZhi (16kHz hoặc 24kHz Mono 16-bit)
     private var audioTrack: AudioTrack? = null
     private var currentPlaySampleRate = 0
     private val playQueue = LinkedBlockingQueue<ByteArray>()
     private val isPlayerRunning = AtomicBoolean(false)
     private var playerThread: Thread? = null
 
+    // Phát radio / nhạc qua URL (HLS m3u8, mp3, aac)
+    private var mediaPlayer: MediaPlayer? = null
+    private var mediaPrepared = false
+    private var mediaWantPlaying = false
+    private var mediaTitle = ""
+    private var mediaUrl = ""
+    private var mediaVolume = 1.0f
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         acquireWakeLock()
 
-        // Preload native Sherpa-ONNX & Opus cho kiến trúc ARMv7 (Allwinner A33) / ARM64
+        // Nạp sẵn thư viện native Sherpa-ONNX & Opus (ARMv7 / ARM64)
         try {
             System.loadLibrary("onnxruntime")
             System.loadLibrary("sherpa-onnx-c-api")
@@ -67,7 +82,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // 1. EventChannel đẩy luồng PCM 16kHz liên tục từ mảng 4 Mic (ZNJ Voice Array) lên Flutter
+        // 1. Luồng PCM 16kHz liên tục từ mic lên Flutter
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, MIC_STREAM_CHANNEL)
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -79,28 +94,22 @@ class MainActivity : FlutterActivity() {
                 }
             })
 
-        // 2. MethodChannel điều khiển Thu âm & Phát PCM độ trễ thấp + Âm lượng loa
+        // 2. Thu âm & phát PCM độ trễ thấp + âm lượng loa
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AUDIO_METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "startMic" -> {
-                        val ok = startMicCapture()
-                        result.success(ok)
-                    }
+                    "startMic" -> result.success(startMicCapture())
                     "stopMic" -> {
                         stopMicCapture()
                         result.success(true)
                     }
                     "initPlayer" -> {
-                        val sampleRate = call.argument<Int>("sampleRate") ?: 24000
-                        initPcmPlayer(sampleRate)
+                        initPcmPlayer(call.argument<Int>("sampleRate") ?: 24000)
                         result.success(true)
                     }
                     "writePcm" -> {
                         val pcm = call.argument<ByteArray>("pcm")
-                        if (pcm != null && pcm.isNotEmpty()) {
-                            playQueue.offer(pcm)
-                        }
+                        if (pcm != null && pcm.isNotEmpty()) playQueue.offer(pcm)
                         result.success(true)
                     }
                     "stopPlayer" -> {
@@ -112,53 +121,265 @@ class MainActivity : FlutterActivity() {
                         setSystemVolume(percent)
                         result.success(percent)
                     }
-                    "getVolume" -> {
-                        result.success(getSystemVolume())
-                    }
+                    "getVolume" -> result.success(getSystemVolume())
                     else -> result.notImplemented()
                 }
             }
 
-        // 3. MethodChannel hỗ trợ phần cứng Robot (Cấp quyền cổng UART trên board Allwinner root, quét cổng /dev/tty*, gửi Broadcast)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, HARDWARE_CHANNEL)
+        // 3. Media, trình duyệt, camera, cài đặt hệ thống
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "listSerialPorts" -> {
-                        val devDir = File("/dev")
-                        val ports = devDir.listFiles()
-                            ?.map { it.absolutePath }
-                            ?.filter {
-                                it.startsWith("/dev/ttyS") ||
-                                    it.startsWith("/dev/ttyUSB") ||
-                                    it.startsWith("/dev/ttyACM") ||
-                                    it.startsWith("/dev/ttyMT") ||
-                                    it.startsWith("/dev/ttyAMA")
-                            }
-                            ?.sorted()
-                            ?: listOf("/dev/ttyS1", "/dev/ttyS0", "/dev/ttyS2", "/dev/ttyUSB0")
-                        result.success(ports)
-                    }
-                    "prepareSerialPort" -> {
-                        val path = call.argument<String>("path") ?: "/dev/ttyS1"
-                        val baudrate = call.argument<Int>("baudrate") ?: 9600
-                        val prepared = prepareSerialPortPermissions(path, baudrate)
-                        result.success(prepared)
-                    }
-                    "sendRobotBroadcast" -> {
-                        val action = call.argument<String>("action") ?: ""
-                        val code = call.argument<String>("code") ?: ""
-                        if (action.isNotEmpty()) {
-                            val intent = Intent(action).apply {
-                                putExtra("robonova_code", code)
-                            }
-                            sendBroadcast(intent)
+                    "mediaPlay" -> result.success(
+                        mediaPlay(call.argument<String>("url") ?: "", call.argument<String>("title") ?: "")
+                    )
+                    "mediaPause" -> {
+                        mediaWantPlaying = false
+                        try {
+                            if (mediaPrepared && mediaPlayer?.isPlaying == true) mediaPlayer?.pause()
+                        } catch (_: Throwable) {
                         }
                         result.success(true)
+                    }
+                    "mediaResume" -> {
+                        if (mediaPlayer != null) {
+                            mediaWantPlaying = true
+                            try {
+                                if (mediaPrepared) mediaPlayer?.start()
+                            } catch (_: Throwable) {
+                            }
+                        }
+                        result.success(true)
+                    }
+                    "mediaStop" -> {
+                        mediaStop()
+                        result.success(true)
+                    }
+                    "mediaSetVolume" -> {
+                        mediaVolume = ((call.argument<Double>("volume") ?: 1.0).toFloat()).coerceIn(0f, 1f)
+                        try {
+                            mediaPlayer?.setVolume(mediaVolume, mediaVolume)
+                        } catch (_: Throwable) {
+                        }
+                        result.success(true)
+                    }
+                    "mediaState" -> result.success(
+                        mapOf(
+                            // "playing" = đang phát HOẶC đang tải để phát
+                            "playing" to (mediaPlayer != null && mediaWantPlaying),
+                            "title" to mediaTitle,
+                            "url" to mediaUrl,
+                        )
+                    )
+                    "openBrowser" -> {
+                        val url = call.argument<String>("url") ?: "https://www.google.com"
+                        startActivity(
+                            Intent(this, BrowserActivity::class.java)
+                                .putExtra(BrowserActivity.EXTRA_URL, url)
+                                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        )
+                        result.success(true)
+                    }
+                    "closeBrowser" -> {
+                        BrowserActivity.current?.get()?.finish()
+                        result.success(true)
+                    }
+                    "takePhoto" -> takePhoto(result)
+                    "openWifiSettings" -> {
+                        safeStart(Intent(Settings.ACTION_WIFI_SETTINGS))
+                        result.success(true)
+                    }
+                    "openSystemSettings" -> {
+                        safeStart(Intent(Settings.ACTION_SETTINGS))
+                        result.success(true)
+                    }
+                    "openHomeSettings" -> {
+                        if (!safeStart(Intent(Settings.ACTION_HOME_SETTINGS))) {
+                            safeStart(Intent(Settings.ACTION_SETTINGS))
+                        }
+                        result.success(true)
+                    }
+                    "isDefaultLauncher" -> {
+                        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                        val info = packageManager.resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY)
+                        result.success(info?.activityInfo?.packageName == packageName)
                     }
                     else -> result.notImplemented()
                 }
             }
     }
+
+    private fun safeStart(intent: Intent): Boolean {
+        return try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    // ------------------------------------------------------------------ Media
+
+    private fun mediaPlay(url: String, title: String): Boolean {
+        if (url.isEmpty()) return false
+        mediaStop()
+        return try {
+            val mp = MediaPlayer()
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            mp.setDataSource(url)
+            mp.setVolume(mediaVolume, mediaVolume)
+            mp.setOnPreparedListener {
+                mediaPrepared = true
+                if (mediaWantPlaying) it.start()
+            }
+            mp.setOnErrorListener { _, _, _ ->
+                mediaStop()
+                true
+            }
+            mp.setOnCompletionListener {
+                mediaWantPlaying = false
+            }
+            mediaPlayer = mp
+            mediaPrepared = false
+            mediaWantPlaying = true
+            mediaTitle = title
+            mediaUrl = url
+            mp.prepareAsync()
+            true
+        } catch (_: Throwable) {
+            mediaStop()
+            false
+        }
+    }
+
+    private fun mediaStop() {
+        mediaWantPlaying = false
+        mediaPrepared = false
+        val mp = mediaPlayer
+        mediaPlayer = null
+        mediaTitle = ""
+        mediaUrl = ""
+        try {
+            mp?.stop()
+        } catch (_: Throwable) {
+        }
+        try {
+            mp?.release()
+        } catch (_: Throwable) {
+        }
+    }
+
+    // ------------------------------------------------------------------ Camera
+
+    /** Chụp 1 ảnh từ camera trước (hoặc camera bất kỳ), thu nhỏ còn cạnh dài 1024px, JPEG 80%. */
+    @Suppress("DEPRECATION")
+    private fun takePhoto(result: MethodChannel.Result) {
+        val replied = AtomicBoolean(false)
+        fun reply(bytes: ByteArray?, error: String?) {
+            if (!replied.compareAndSet(false, true)) return
+            mainHandler.post {
+                if (bytes != null) result.success(bytes) else result.error("CAMERA", error, null)
+            }
+        }
+
+        var cameraId = 0
+        val info = Camera.CameraInfo()
+        for (i in 0 until Camera.getNumberOfCameras()) {
+            Camera.getCameraInfo(i, info)
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+                cameraId = i
+                break
+            }
+        }
+
+        val camera = try {
+            Camera.open(cameraId)
+        } catch (e: Throwable) {
+            reply(null, "Không mở được camera: ${e.message}")
+            return
+        }
+
+        val texture = SurfaceTexture(10)
+        fun release() {
+            try {
+                camera.stopPreview()
+            } catch (_: Throwable) {
+            }
+            try {
+                camera.release()
+            } catch (_: Throwable) {
+            }
+            try {
+                texture.release()
+            } catch (_: Throwable) {
+            }
+        }
+
+        try {
+            val params = camera.parameters
+            val best = params.supportedPictureSizes
+                .filter { it.width <= 2048 }
+                .maxByOrNull { it.width * it.height }
+            if (best != null) params.setPictureSize(best.width, best.height)
+            params.pictureFormat = android.graphics.ImageFormat.JPEG
+            camera.parameters = params
+            camera.setPreviewTexture(texture)
+            camera.startPreview()
+        } catch (e: Throwable) {
+            release()
+            reply(null, "Lỗi khởi động camera: ${e.message}")
+            return
+        }
+
+        // Chờ camera cân bằng sáng rồi chụp
+        mainHandler.postDelayed({
+            try {
+                camera.takePicture(null, null) { data, _ ->
+                    release()
+                    Thread {
+                        try {
+                            reply(shrinkJpeg(data), null)
+                        } catch (e: Throwable) {
+                            reply(null, "Lỗi xử lý ảnh: ${e.message}")
+                        }
+                    }.start()
+                }
+            } catch (e: Throwable) {
+                release()
+                reply(null, "Lỗi chụp ảnh: ${e.message}")
+            }
+        }, 900)
+
+        // Hết thời gian chờ
+        mainHandler.postDelayed({
+            if (!replied.get()) {
+                release()
+                reply(null, "Camera không phản hồi")
+            }
+        }, 8000)
+    }
+
+    private fun shrinkJpeg(data: ByteArray): ByteArray {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1024) sample *= 2
+        val bmp = BitmapFactory.decodeByteArray(data, 0, data.size, BitmapFactory.Options().apply {
+            inSampleSize = sample
+        }) ?: return data
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        bmp.recycle()
+        return out.toByteArray()
+    }
+
+    // ------------------------------------------------------------------ Mic / PCM
 
     private fun startMicCapture(): Boolean {
         if (isRecording.get()) return true
@@ -168,26 +389,14 @@ class MainActivity : FlutterActivity() {
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
         if (minBuf <= 0) return false
 
-        // 1920 bytes = 960 samples = đúng 1 khung 60ms ở 16kHz (chuẩn Opus XiaoZhi & rất mượt cho Sherpa-ONNX)
+        // 1920 bytes = 960 mẫu = 1 khung 60ms ở 16kHz (chuẩn Opus XiaoZhi)
         val frameBytes = 1920
         val bufferSize = maxOf(minBuf * 2, frameBytes * 4)
 
         val record = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
+            AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate, channelConfig, audioFormat, bufferSize)
         } catch (_: Throwable) {
-            AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
+            AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, channelConfig, audioFormat, bufferSize)
         }
 
         if (record.state != AudioRecord.STATE_INITIALIZED) {
@@ -195,20 +404,27 @@ class MainActivity : FlutterActivity() {
             return false
         }
 
-        // Bật khử vọng (AEC) & lọc ồn phần cứng nếu chip âm thanh A33 / ZNJ hỗ trợ
+        // Khử vọng & lọc ồn phần cứng nếu có
         try {
-            if (AcousticEchoCanceler.isAvailable()) {
-                AcousticEchoCanceler.create(record.audioSessionId)?.enabled = true
-            }
-            if (NoiseSuppressor.isAvailable()) {
-                NoiseSuppressor.create(record.audioSessionId)?.enabled = true
-            }
+            if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(record.audioSessionId)?.enabled = true
+            if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(record.audioSessionId)?.enabled = true
         } catch (_: Throwable) {
+        }
+
+        try {
+            record.startRecording()
+        } catch (_: Throwable) {
+            record.release()
+            return false
+        }
+        if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            // Mic đang bị ứng dụng khác giữ
+            record.release()
+            return false
         }
 
         audioRecord = record
         isRecording.set(true)
-        record.startRecording()
 
         recordThread = Thread({
             val buf = ByteArray(frameBytes)
@@ -216,17 +432,11 @@ class MainActivity : FlutterActivity() {
                 var offset = 0
                 while (offset < frameBytes && isRecording.get()) {
                     val read = record.read(buf, offset, frameBytes - offset)
-                    if (read > 0) {
-                        offset += read
-                    } else {
-                        break
-                    }
+                    if (read > 0) offset += read else break
                 }
                 if (offset == frameBytes && isRecording.get()) {
                     val copy = buf.copyOf()
-                    mainHandler.post {
-                        micEventSink?.success(copy)
-                    }
+                    mainHandler.post { micEventSink?.success(copy) }
                 }
             }
         }, "MinaMicThread").apply {
@@ -255,45 +465,27 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun initPcmPlayer(sampleRate: Int) {
-        if (audioTrack != null && currentPlaySampleRate == sampleRate && isPlayerRunning.get()) {
-            return
-        }
+        if (audioTrack != null && currentPlaySampleRate == sampleRate && isPlayerRunning.get()) return
         stopPcmPlayerInternal()
         currentPlaySampleRate = sampleRate
 
-        val minBuf = AudioTrack.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
+        val minBuf = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val bufferSize = maxOf(minBuf * 2, sampleRate / 2)
 
-        val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            AudioTrack(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build(),
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build(),
-                bufferSize,
-                AudioTrack.MODE_STREAM,
-                AudioManager.AUDIO_SESSION_ID_GENERATE
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            AudioTrack(
-                AudioManager.STREAM_MUSIC,
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize,
-                AudioTrack.MODE_STREAM
-            )
-        }
+        val track = AudioTrack(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build(),
+            AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build(),
+            bufferSize,
+            AudioTrack.MODE_STREAM,
+            AudioManager.AUDIO_SESSION_ID_GENERATE
+        )
 
         audioTrack = track
         track.play()
@@ -303,9 +495,7 @@ class MainActivity : FlutterActivity() {
             while (isPlayerRunning.get()) {
                 try {
                     val chunk = playQueue.poll(50, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    if (chunk != null && chunk.isNotEmpty()) {
-                        track.write(chunk, 0, chunk.size)
-                    }
+                    if (chunk != null && chunk.isNotEmpty()) track.write(chunk, 0, chunk.size)
                 } catch (_: InterruptedException) {
                     break
                 } catch (_: Throwable) {
@@ -347,28 +537,6 @@ class MainActivity : FlutterActivity() {
         audioTrack = null
     }
 
-    private fun prepareSerialPortPermissions(path: String, baudrate: Int): Boolean {
-        val file = File(path)
-        val sttyCmd = "(stty -F $path $baudrate cs8 -cstopb -parenb cread clocal -crtscts raw -echo || " +
-            "busybox stty -F $path $baudrate cs8 -cstopb -parenb cread clocal raw -echo)"
-        if (file.canRead() && file.canWrite()) {
-            try {
-                Runtime.getRuntime().exec(arrayOf("sh", "-c", sttyCmd)).waitFor()
-            } catch (_: Throwable) {
-            }
-            return true
-        }
-        // Các board Android nhúng Allwinner A33 thường có sẵn su để cấp quyền /dev/ttyS* và cấu hình 8N1 2 chiều
-        return try {
-            val cmd = "chmod 666 $path && $sttyCmd"
-            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            proc.waitFor()
-            file.canRead() && file.canWrite()
-        } catch (_: Throwable) {
-            file.canWrite()
-        }
-    }
-
     private fun setSystemVolume(percent: Int) {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
@@ -386,10 +554,7 @@ class MainActivity : FlutterActivity() {
     private fun acquireWakeLock() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "MinaRobot::BackgroundVoiceWakeLock"
-            ).apply {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MinaVisbot::VoiceWakeLock").apply {
                 acquire()
             }
         } catch (_: Throwable) {
@@ -399,10 +564,9 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         stopMicCapture()
         stopPcmPlayerInternal()
+        mediaStop()
         try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
+            if (wakeLock?.isHeld == true) wakeLock?.release()
         } catch (_: Throwable) {
         }
         super.onDestroy()

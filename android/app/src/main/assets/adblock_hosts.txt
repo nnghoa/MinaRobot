@@ -1,0 +1,67 @@
+# Danh sách tên miền quảng cáo / theo dõi bị chặn trong trình duyệt Mina.
+# Mỗi dòng một tên miền; chặn luôn mọi tên miền con. Dòng bắt đầu bằng # là ghi chú.
+# KHÔNG thêm googlevideo.com / ytimg.com (YouTube cần để phát video).
+
+# Google quảng cáo & theo dõi
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+adservice.google.com
+adservice.google.com.vn
+pagead2.googlesyndication.com
+google-analytics.com
+googletagservices.com
+googletagmanager.com
+imasdk.googleapis.com
+
+# Mạng quảng cáo quốc tế
+adnxs.com
+adsrvr.org
+amazon-adsystem.com
+criteo.com
+criteo.net
+taboola.com
+outbrain.com
+pubmatic.com
+rubiconproject.com
+openx.net
+casalemedia.com
+smartadserver.com
+adform.net
+teads.tv
+moatads.com
+scorecardresearch.com
+quantserve.com
+adcolony.com
+applovin.com
+unityads.unity3d.com
+popads.net
+popcash.net
+propellerads.com
+exoclick.com
+mgid.com
+revcontent.com
+zedo.com
+media.net
+yieldmo.com
+3lift.com
+sharethrough.com
+bidswitch.net
+contextweb.com
+indexww.com
+sonobi.com
+spotxchange.com
+lijit.com
+connect.facebook.net
+an.facebook.com
+
+# Mạng quảng cáo Việt Nam
+admicro.vn
+eclick.vn
+adtima.vn
+yomedia.vn
+ants.vn
+adnetwork.vn
+novanet.vn
+adsplay.net
+adx.com.vn

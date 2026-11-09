@@ -1,31 +1,53 @@
-import '../models/mina_state.dart';
-import '../robot/robonova_actions.dart';
-import '../robot/robonova_serial_driver.dart';
-import '../services/mina_audio_service.dart';
+import 'dart:convert';
 
-/// Máy chủ MCP (Model Context Protocol - JSON-RPC 2.0) tích hợp ngay bên trong Robot Mina.
-/// Phơi bày toàn bộ 63 động tác & hệ thống cảm biến của mạch MR-C3024FX cho AI XiaoZhi gọi tự động không giới hạn!
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
+
+import '../models/assistant_profile.dart';
+import '../models/mina_state.dart';
+import '../services/mina_audio_service.dart';
+import '../services/mina_platform.dart';
+import '../services/mina_web_tools.dart';
+
+/// Máy chủ MCP (JSON-RPC 2.0) chạy ngay trong Mina Visbot.
+/// XiaoZhi gọi các công cụ này khi người dùng ra lệnh bằng giọng nói.
 class MinaMcpServer {
-  final RobonovaSerialDriver robotDriver;
   final MinaAudioService audioService;
   final void Function(MinaEmotion emotion) onEmotionChanged;
-  final bool Function()? isObstacleSafeWalkEnabled;
-  final Future<void> Function({
-    bool? hardwareReflex,
-    bool? autoGreet,
-    bool? autoStandup,
-    bool? obstacleSafeWalk,
-  })? onUpdateSafetyConfig;
+
+  /// Yêu cầu chuyển sang trợ lý khác. Chạy SAU khi đã trả kết quả cho server.
+  final void Function(String assistantId) onSwitchAssistant;
+
+  /// Báo cho controller biết vừa bật radio/nhạc/video: controller tạm dừng media,
+  /// để AI nói xong câu xác nhận, rồi đóng phiên và phát media.
+  final Future<void> Function() onMediaStarted;
+
+  /// Định danh thiết bị hiện tại (dùng cho header khi gửi ảnh lên server vision)
+  final String Function() deviceMac;
+  final String Function() clientId;
+  final String Function() activeAssistantId;
   final void Function(String tag, String msg)? onLog;
 
+  String? _visionUrl;
+  String? _visionToken;
+
   MinaMcpServer({
-    required this.robotDriver,
     required this.audioService,
     required this.onEmotionChanged,
-    this.isObstacleSafeWalkEnabled,
-    this.onUpdateSafetyConfig,
+    required this.onSwitchAssistant,
+    required this.onMediaStarted,
+    required this.deviceMac,
+    required this.clientId,
+    required this.activeAssistantId,
     this.onLog,
   });
+
+  bool get hasVision => (_visionUrl ?? '').isNotEmpty;
+
+  void resetSession() {
+    _visionUrl = null;
+    _visionToken = null;
+  }
 
   /// Xử lý gói JSON-RPC `payload` bên trong message `{"type": "mcp", "payload": ...}` từ XiaoZhi
   Future<Map<String, dynamic>?> handleJsonRpc(Map<String, dynamic> rpc) async {
@@ -39,6 +61,13 @@ class MinaMcpServer {
     }
 
     if (method == 'initialize') {
+      // Server XiaoZhi gửi kèm địa chỉ dịch vụ phân tích ảnh (vision) trong capabilities
+      final params = (rpc['params'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final caps = (params['capabilities'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final vision = (caps['vision'] as Map?)?.cast<String, dynamic>();
+      _visionUrl = vision?['url']?.toString();
+      _visionToken = vision?['token']?.toString();
+      onLog?.call('MCP', hasVision ? 'Server hỗ trợ phân tích ảnh camera.' : 'Server không gửi cấu hình vision.');
       return {
         'jsonrpc': '2.0',
         'id': id,
@@ -48,8 +77,8 @@ class MinaMcpServer {
             'tools': {},
           },
           'serverInfo': {
-            'name': 'MinaHumanoidRobot',
-            'version': '1.0.0',
+            'name': 'MinaVisbot',
+            'version': '2.0.0',
           },
         },
       };
@@ -70,7 +99,14 @@ class MinaMcpServer {
       final toolName = params['name'] as String? ?? '';
       final args = (params['arguments'] as Map?)?.cast<String, dynamic>() ?? const {};
 
-      final outputText = await _executeTool(toolName, args);
+      String outputText;
+      var isError = false;
+      try {
+        outputText = await _executeTool(toolName, args);
+      } catch (e) {
+        outputText = 'Lỗi khi chạy công cụ $toolName: $e';
+        isError = true;
+      }
       return {
         'jsonrpc': '2.0',
         'id': id,
@@ -81,7 +117,7 @@ class MinaMcpServer {
               'text': outputText,
             }
           ],
-          'isError': false,
+          'isError': isError,
         },
       };
     }
@@ -100,365 +136,321 @@ class MinaMcpServer {
   }
 
   List<Map<String, dynamic>> _buildToolsCatalog() {
-    final allSlugs = RobonovaActionCatalog.all.map((a) => a.slug).toList();
-    final actionDescriptions = RobonovaActionCatalog.all
-        .map((a) => '${a.slug} (${a.id}: ${a.nameVi})')
-        .join(', ');
+    final assistantDesc =
+        AssistantCatalog.all.map((a) => '${a.id} (${a.name}: ${a.subtitle})').join(', ');
+    final radioDesc = RadioCatalog.all.map((s) => '${s.id} (${s.name})').join(', ');
 
     return [
       {
-        'name': 'self.mina.walk',
+        'name': 'self.assistant.switch',
         'description':
-            'Điều khiển robot Mina đi bộ, chạy, quay trái/phải, bước ngang, leo cầu thang. '
-            'Dùng khi người dùng bảo tiến lên, lùi lại, sang trái, sang phải, quay lại, chạy nhanh.',
+            'Chuyển sang trợ lý / gia sư khác khi người dùng muốn học hoặc gọi tên trợ lý '
+            '(ví dụ "cho gặp gia sư toán", "học tiếng Anh", "kể chuyện cho bé"). '
+            'Danh sách: $assistantDesc. Sau khi gọi, phiên hiện tại sẽ kết thúc và trợ lý mới tự chào.',
         'inputSchema': {
           'type': 'object',
           'properties': {
-            'direction': {
+            'assistant': {
               'type': 'string',
-              'enum': [
-                'walk_forward',
-                'walk_backward',
-                'turn_left',
-                'turn_right',
-                'shift_left',
-                'shift_right',
-                'fast_walk',
-                'very_fast_walk',
-                'fast_run',
-                'fast_turn_left_1',
-                'fast_turn_right_1',
-                'climb_upstair',
-              ],
-              'description': 'Hướng hoặc kiểu di chuyển của robot Mina.',
-            },
-            'steps': {
-              'type': 'integer',
-              'minimum': 1,
-              'maximum': 5,
-              'description': 'Số lần lặp lại nhịp bước (mặc định 1).',
+              'enum': AssistantCatalog.all.map((a) => a.id).toList(),
             },
           },
-          'required': ['direction'],
+          'required': ['assistant'],
         },
       },
       {
-        'name': 'self.mina.greet',
+        'name': 'self.camera.take_photo',
         'description':
-            'Điều khiển robot Mina chào hỏi, bắt tay, vỗ tay, vẫy tay, giơ hai tay, cổ vũ ăn mừng.',
+            'Chụp ảnh bằng camera trước của robot và hỏi AI về nội dung ảnh. Dùng khi người dùng hỏi '
+            '"đây là cái gì", "nhìn bài tập này", "đọc giúp trang sách này", "bạn thấy gì".',
         'inputSchema': {
           'type': 'object',
           'properties': {
-            'gesture': {
+            'question': {
               'type': 'string',
-              'enum': [
-                'bow',
-                'honor_bow',
-                'hand_shake',
-                'hand_clap',
-                'wave_arms',
-                'hands_up',
-                'cheer_up',
-                'big_reach',
-              ],
-              'description': 'Cử chỉ giao tiếp xã hội của Mina.',
+              'description': 'Câu hỏi về bức ảnh, ví dụ "Đề bài toán trong ảnh là gì?"',
             },
           },
-          'required': ['gesture'],
+          'required': ['question'],
         },
       },
       {
-        'name': 'self.mina.dance_and_acrobatics',
-        'description':
-            'Điều khiển robot Mina nhảy múa (Dance 1, Dance 2, Dance 3, Break Dance), chống đẩy/hít đất, '
-            'trồng chuối (handstand), đứng một chân, hoặc nhào lộn trước/sau/trái/phải.',
+        'name': 'self.media.play_radio',
+        'description': 'Phát kênh radio trực tiếp. Các kênh: $radioDesc.',
         'inputSchema': {
           'type': 'object',
           'properties': {
-            'move': {
+            'station': {
               'type': 'string',
-              'enum': [
-                'dance_1',
-                'dance_2',
-                'dance_3',
-                'break_dance',
-                'push_up',
-                'pushup_music',
-                'handstand',
-                'single_foot_stand',
-                'forward_tumbling',
-                'back_tumbling',
-                'left_tumbling',
-                'right_tumbling',
-                'body_shake',
-                'foot_up',
-              ],
-              'description': 'Bài nhảy hoặc động tác nhào lộn thể lực.',
+              'enum': RadioCatalog.all.map((s) => s.id).toList(),
             },
           },
-          'required': ['move'],
+          'required': ['station'],
         },
       },
       {
-        'name': 'self.mina.martial_arts',
-        'description':
-            'Điều khiển robot Mina biểu diễn võ thuật (5 thế võ kungfu), đấm thẳng, đấm trái/phải, '
-            'sút bóng, làm thủ môn bắt bóng, hoặc né đòn kiểu Matrix.',
+        'name': 'self.media.play_url',
+        'description': 'Phát một luồng âm thanh hoặc file nhạc từ đường link trực tiếp (mp3, m3u8, aac).',
         'inputSchema': {
           'type': 'object',
           'properties': {
-            'skill': {
-              'type': 'string',
-              'enum': [
-                'martial_arts_1',
-                'martial_arts_2',
-                'martial_arts_3',
-                'martial_arts_4',
-                'martial_arts_5',
-                'forward_punch',
-                'left_attack',
-                'right_attack',
-                'big_toss',
-                'avoid_matrix',
-                'shoot_left_right',
-                'goalkeeper',
-              ],
-              'description': 'Chiêu thức võ thuật hoặc thể thao.',
-            },
+            'url': {'type': 'string'},
+            'title': {'type': 'string'},
           },
-          'required': ['skill'],
+          'required': ['url'],
         },
       },
       {
-        'name': 'self.mina.posture_and_standup',
-        'description':
-            'Điều khiển robot Mina ngồi xuống, tự đứng dậy khi bị ngã ngửa hoặc ngã sấp, hoặc nghỉ tắt motor.',
-        'inputSchema': {
-          'type': 'object',
-          'properties': {
-            'posture': {
-              'type': 'string',
-              'enum': [
-                'sit_down',
-                'stand_up_from_back',
-                'stand_up_from_front',
-                'toggle_motor_sit',
-                'toggle_sit_pose_2',
-              ],
-              'description': 'Tư thế ngồi hoặc đứng dậy.',
-            },
-          },
-          'required': ['posture'],
-        },
-      },
-      {
-        'name': 'self.mina.perform_any_action',
-        'description':
-            'Thực thi bất kỳ hành động nào trong tổng số 63 hành động gốc (K1..K68) của Mina theo mã K hoặc slug: '
-            '$actionDescriptions',
+        'name': 'self.media.control',
+        'description': 'Điều khiển nhạc/radio đang phát: tạm dừng, phát tiếp, hoặc tắt hẳn.',
         'inputSchema': {
           'type': 'object',
           'properties': {
             'action': {
               'type': 'string',
-              'enum': allSlugs,
-              'description': 'Slug của hành động trong danh mục 63 động tác Robonova-II.',
+              'enum': ['pause', 'resume', 'stop', 'status'],
             },
           },
           'required': ['action'],
         },
       },
       {
-        'name': 'self.mina.set_emotion',
-        'description': 'Đổi biểu cảm khuôn mặt hoạt hình trên màn hình ngực của Mina.',
+        'name': 'self.youtube.search',
+        'description':
+            'Mở YouTube và tìm video / bài hát theo từ khóa trên màn hình robot. Dùng khi người dùng '
+            'muốn xem video, nghe một bài hát cụ thể, hoặc xem hoạt hình.',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'query': {'type': 'string', 'description': 'Từ khóa tìm kiếm, ví dụ "nhạc thiếu nhi"'},
+          },
+          'required': ['query'],
+        },
+      },
+      {
+        'name': 'self.web.search',
+        'description':
+            'Tìm kiếm thông tin trên Internet (tin tức, giá cả, thời tiết, kiến thức). Trả về danh sách '
+            'tiêu đề, đường link và đoạn tóm tắt. Có thể gọi tiếp self.web.read_page để đọc chi tiết.',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'query': {'type': 'string'},
+          },
+          'required': ['query'],
+        },
+      },
+      {
+        'name': 'self.web.read_page',
+        'description':
+            'Đọc nội dung chính của một trang web dưới dạng chữ (đã bỏ quảng cáo, menu) để tóm tắt cho người dùng.',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'url': {'type': 'string'},
+          },
+          'required': ['url'],
+        },
+      },
+      {
+        'name': 'self.browser.open',
+        'description': 'Mở trang web trên màn hình robot bằng trình duyệt chặn quảng cáo.',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'url': {'type': 'string'},
+          },
+          'required': ['url'],
+        },
+      },
+      {
+        'name': 'self.browser.close',
+        'description': 'Đóng trình duyệt / YouTube đang mở trên màn hình, quay về khuôn mặt Mina.',
+        'inputSchema': {'type': 'object', 'properties': {}},
+      },
+      {
+        'name': 'self.screen.set_emotion',
+        'description': 'Đổi biểu cảm khuôn mặt trên màn hình robot.',
         'inputSchema': {
           'type': 'object',
           'properties': {
             'emotion': {
               'type': 'string',
-              'enum': ['happy', 'love', 'martial', 'surprised', 'sleepy', 'idle'],
+              'enum': ['happy', 'love', 'surprised', 'sleepy', 'thinking', 'idle'],
             },
           },
           'required': ['emotion'],
         },
       },
       {
-        'name': 'self.mina.set_volume',
-        'description': 'Điều chỉnh âm lượng loa của robot Mina (từ 0 đến 100%).',
+        'name': 'self.audio_speaker.set_volume',
+        'description': 'Chỉnh âm lượng loa của robot (0-100).',
         'inputSchema': {
           'type': 'object',
           'properties': {
-            'volume': {
-              'type': 'integer',
-              'minimum': 0,
-              'maximum': 100,
-              'description': 'Mức âm lượng phần trăm (0-100).',
-            },
+            'volume': {'type': 'integer', 'minimum': 0, 'maximum': 100},
           },
           'required': ['volume'],
         },
       },
       {
-        'name': 'self.mina.read_sensors',
+        'name': 'self.robot.move',
         'description':
-            'Đọc dữ liệu cảm biến thời gian thực gắn trên mạch Robonova-II (MR-C3024FX): '
-            'cảm biến siêu âm trên mắt (cm), cảm biến khoảng cách 10k (ADC 0-255 & cm ước tính), '
-            'điện áp pin (V & %), và tư thế nghiêng/ngã. Dùng khi người dùng hỏi phía trước có vật cản không, '
-            'khoảng cách bao xa, còn bao nhiêu pin, hoặc kiểm tra đường đi.',
-        'inputSchema': {
-          'type': 'object',
-          'properties': {},
-        },
-      },
-      {
-        'name': 'self.mina.set_safety_reflex',
-        'description':
-            'Bật hoặc tắt các chế độ phản xạ thông minh từ cảm biến của Mina: '
-            'tự tránh vật cản khi bước tới, tự vẫy tay chào khi mắt siêu âm thấy người đứng trước mặt, '
-            'và tự đứng dậy khi bị ngã.',
+            'Yêu cầu robot di chuyển hoặc quay đầu. Hiện Mina CHƯA có quyền điều khiển bánh xe và đầu của '
+            'Visbot (do hệ thống UBTECH khóa); robot tự di chuyển theo chương trình gốc. Gọi công cụ này để '
+            'biết trạng thái và giải thích cho người dùng.',
         'inputSchema': {
           'type': 'object',
           'properties': {
-            'hardware_reflex': {
-              'type': 'boolean',
-              'description': 'Bật/tắt phản xạ tự tránh vật cản & chống ngã ngay trên chip MR-C3024FX.',
-            },
-            'obstacle_safe_walk': {
-              'type': 'boolean',
-              'description': 'Bật/tắt kiểm tra vật cản an toàn trước khi Mina bước tiến.',
-            },
-            'auto_greet_sonar': {
-              'type': 'boolean',
-              'description': 'Bật/tắt tự động vẫy tay chào khi mắt siêu âm thấy người lại gần (15-65 cm).',
-            },
-            'auto_standup_fall': {
-              'type': 'boolean',
-              'description': 'Bật/tắt tự động đứng dậy (K19/K25) khi cảm biến nghiêng phát hiện bị ngã.',
+            'direction': {
+              'type': 'string',
+              'enum': ['forward', 'backward', 'turn_left', 'turn_right', 'head_left', 'head_right', 'stop'],
             },
           },
+          'required': ['direction'],
         },
       },
     ];
   }
 
-  static const Set<String> _forwardSlugs = {
-    'walk_forward',
-    'fast_walk',
-    'very_fast_walk',
-    'fast_run',
-    'climb_upstair',
-  };
-
   Future<String> _executeTool(String name, Map<String, dynamic> args) async {
     switch (name) {
-      case 'self.mina.walk':
-        final slug = args['direction']?.toString() ?? 'walk_forward';
-        final steps = _asInt(args['steps']) ?? 1;
-        final checkSafety = isObstacleSafeWalkEnabled?.call() ?? true;
-        if (checkSafety && _forwardSlugs.contains(slug)) {
-          final s = await robotDriver.requestSensorSnapshot();
-          if (s.hasObstacle) {
-            onEmotionChanged(MinaEmotion.surprised);
-            final sonarDesc = s.sonarCm != null ? '${s.sonarCm} cm' : 'ngoài tầm';
-            return 'CẢNH BÁO VẬT CẢN PHÍA TRƯỚC: Mắt siêu âm đo được $sonarDesc '
-                '(ngưỡng < ${s.sonarObstacleThresholdCm} cm), cảm biến khoảng cách 10k ADC=${s.dist10kRaw} '
-                '(ngưỡng > ${s.dist10kObstacleThreshold}). Mina đã tự động dừng bước tiến để tránh va chạm! '
-                'Hãy báo cho người dùng biết có vật cản trước mặt và đề nghị đi lùi (walk_backward) hoặc rẽ hướng khác.';
-          }
+      case 'self.assistant.switch':
+        final target = AssistantCatalog.byId(args['assistant']?.toString());
+        if (target.id == activeAssistantId()) {
+          return 'Bạn đang là ${target.name} rồi.';
         }
-        return _runRobotSlug(slug, repeat: steps);
+        // Chuyển sau một nhịp để server kịp nhận kết quả và nói câu chuyển tiếp
+        Future<void>.delayed(const Duration(milliseconds: 2500), () => onSwitchAssistant(target.id));
+        return 'Đang chuyển sang ${target.name}. Hãy nói một câu ngắn như "Mình chuyển sang ${target.name} nhé" rồi dừng.';
 
-      case 'self.mina.greet':
+      case 'self.camera.take_photo':
+        return _takePhotoAndExplain(args['question']?.toString() ?? 'Trong ảnh có gì?');
+
+      case 'self.media.play_radio':
+        final st = RadioCatalog.byId(args['station']?.toString());
+        if (st == null) return 'Không có kênh radio này.';
+        final ok = await MinaPlatform.mediaPlay(st.url, title: st.name);
         onEmotionChanged(MinaEmotion.happy);
-        final slug = args['gesture']?.toString() ?? 'bow';
-        return _runRobotSlug(slug);
+        if (ok) await onMediaStarted();
+        return ok
+            ? 'Đã bật ${st.name}. Hãy xác nhận thật ngắn, radio sẽ phát ngay sau câu trả lời.'
+            : 'Không mở được ${st.name}, có thể mạng đang yếu.';
 
-      case 'self.mina.dance_and_acrobatics':
-        onEmotionChanged(MinaEmotion.happy);
-        final slug = args['move']?.toString() ?? 'dance_1';
-        return _runRobotSlug(slug);
+      case 'self.media.play_url':
+        final url = args['url']?.toString() ?? '';
+        if (url.isEmpty) return 'Thiếu đường link.';
+        final ok = await MinaPlatform.mediaPlay(url, title: args['title']?.toString() ?? '');
+        if (ok) await onMediaStarted();
+        return ok ? 'Đang phát (sau câu trả lời).' : 'Không phát được đường link này.';
 
-      case 'self.mina.martial_arts':
-        onEmotionChanged(MinaEmotion.martial);
-        final slug = args['skill']?.toString() ?? 'martial_arts_1';
-        return _runRobotSlug(slug);
+      case 'self.media.control':
+        final action = args['action']?.toString() ?? 'status';
+        switch (action) {
+          case 'pause':
+            await MinaPlatform.mediaPause();
+            return 'Đã tạm dừng.';
+          case 'resume':
+            await MinaPlatform.mediaResume();
+            await onMediaStarted();
+            return 'Sẽ phát tiếp sau câu trả lời.';
+          case 'stop':
+            await MinaPlatform.mediaStop();
+            return 'Đã tắt nhạc/radio.';
+          default:
+            final st = await MinaPlatform.mediaState();
+            return st['playing'] == true ? 'Đang phát: ${st['title'] ?? ''}' : 'Không có gì đang phát.';
+        }
 
-      case 'self.mina.posture_and_standup':
-        final slug = args['posture']?.toString() ?? 'sit_down';
-        return _runRobotSlug(slug);
+      case 'self.youtube.search':
+        final q = args['query']?.toString() ?? '';
+        await MinaPlatform.mediaStop();
+        await MinaPlatform.openBrowser(
+            'https://m.youtube.com/results?search_query=${Uri.encodeQueryComponent(q)}');
+        // Kết thúc phiên sau câu trả lời để mic không thu tiếng video
+        await onMediaStarted();
+        return 'Đã mở kết quả YouTube cho "$q" trên màn hình. Người dùng chạm vào video để xem. Hãy xác nhận thật ngắn.';
 
-      case 'self.mina.perform_any_action':
-        final slug = args['action']?.toString() ?? 'bow';
-        return _runRobotSlug(slug);
+      case 'self.web.search':
+        final q = args['query']?.toString() ?? '';
+        final results = await MinaWebTools.search(q);
+        if (results.isEmpty) return 'Không tìm thấy kết quả cho "$q".';
+        final buf = StringBuffer('Kết quả tìm kiếm cho "$q":\n');
+        for (var i = 0; i < results.length; i++) {
+          final r = results[i];
+          buf.writeln('${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}');
+        }
+        return buf.toString();
 
-      case 'self.mina.set_emotion':
+      case 'self.web.read_page':
+        return MinaWebTools.readPage(args['url']?.toString() ?? '');
+
+      case 'self.browser.open':
+        var url = args['url']?.toString() ?? '';
+        if (!url.startsWith('http')) url = 'https://$url';
+        await MinaPlatform.openBrowser(url);
+        return 'Đã mở trang $url (đã bật chặn quảng cáo).';
+
+      case 'self.browser.close':
+        await MinaPlatform.closeBrowser();
+        return 'Đã đóng trình duyệt.';
+
+      case 'self.screen.set_emotion':
         final emoStr = args['emotion']?.toString() ?? 'happy';
         onEmotionChanged(parseEmotionFromXiaozhi(emoStr));
-        return 'Mina đã đổi biểu cảm khuôn mặt sang $emoStr.';
+        return 'Đã đổi biểu cảm sang $emoStr.';
 
-      case 'self.mina.set_volume':
+      case 'self.audio_speaker.set_volume':
         final vol = (_asInt(args['volume']) ?? 80).clamp(0, 100).toInt();
         await audioService.setVolume(vol);
-        return 'Đã đặt âm lượng loa của Mina thành $vol%.';
+        return 'Đã đặt âm lượng $vol%.';
 
-      case 'self.mina.read_sensors':
-        final s = await robotDriver.requestSensorSnapshot();
-        if (!s.hasData) {
-          return 'Chưa nhận được gói dữ liệu ETX 9600 từ mạch Robonova-II (kiểm tra dây nối MR-C3024FX ETX -> Android RX và nạp firmware code_robonova2_mina_sensors.bas).';
-        }
-        final sonarStr = s.sonarCm != null ? '${s.sonarCm} cm' : 'Thông thoáng / Ngoài tầm đo';
-        final d10kEst = s.dist10kApproxCm != null ? ' (~${s.dist10kApproxCm!.toStringAsFixed(0)} cm)' : '';
-        final obstacleStr = s.hasObstacle
-            ? 'CÓ VẬT CẢN GẦN PHÍA TRƯỚC!'
-            : 'Đường phía trước thông thoáng, an toàn.';
-        return 'Trạng thái cảm biến Robonova-II hiện tại:\n'
-            '- Mắt siêu âm SONAR(5): $sonarStr\n'
-            '- Cảm biến khoảng cách 10k AD(0): ADC ${s.dist10kRaw}/255$d10kEst\n'
-            '- Đánh giá vật cản: $obstacleStr\n'
-            '- Điện áp Pin AD(6): ${s.batteryVolts.toStringAsFixed(2)}V (~${s.batteryPercent}%)${s.isBatteryLow ? " [PIN YẾU < 5.8V]" : ""}\n'
-            '- Tư thế cơ thể AD(5): ${s.postureLabel} (ADC ${s.tiltRaw})';
-
-      case 'self.mina.set_safety_reflex':
-        final hw = _asBool(args['hardware_reflex']);
-        final safeWalk = _asBool(args['obstacle_safe_walk']);
-        final autoGreet = _asBool(args['auto_greet_sonar']);
-        final autoStandup = _asBool(args['auto_standup_fall']);
-        await onUpdateSafetyConfig?.call(
-          hardwareReflex: hw,
-          obstacleSafeWalk: safeWalk,
-          autoGreet: autoGreet,
-          autoStandup: autoStandup,
-        );
-        return 'Đã cập nhật cấu hình phản xạ cảm biến cho Mina thành công.';
+      case 'self.robot.move':
+        return 'Mina chưa có quyền điều khiển bánh xe/đầu của robot Visbot: hệ thống UBTECH chỉ cho phép '
+            'ứng dụng có chữ ký của hãng. Robot vẫn tự di chuyển theo chương trình gốc. '
+            'Hãy giải thích ngắn gọn điều này cho người dùng.';
 
       default:
         return 'Không tìm thấy công cụ $name.';
     }
   }
 
+  Future<String> _takePhotoAndExplain(String question) async {
+    if (!hasVision) {
+      return 'Server XiaoZhi chưa bật tính năng phân tích ảnh cho thiết bị này (không có cấu hình vision).';
+    }
+    onEmotionChanged(MinaEmotion.thinking);
+    final jpeg = await MinaPlatform.takePhoto();
+    if (jpeg == null || jpeg.isEmpty) {
+      return 'Không chụp được ảnh từ camera.';
+    }
+    onLog?.call('VISION', 'Đã chụp ảnh ${jpeg.length ~/ 1024} KB, gửi phân tích...');
+
+    final req = http.MultipartRequest('POST', Uri.parse(_visionUrl!))
+      ..headers['Device-Id'] = deviceMac()
+      ..headers['Client-Id'] = clientId()
+      ..fields['question'] = question
+      ..files.add(http.MultipartFile.fromBytes('file', jpeg,
+          filename: 'camera.jpg', contentType: MediaType('image', 'jpeg')));
+    if ((_visionToken ?? '').isNotEmpty) {
+      req.headers['Authorization'] = 'Bearer $_visionToken';
+    }
+    final streamed = await req.send().timeout(const Duration(seconds: 30));
+    final body = await streamed.stream.bytesToString();
+    if (streamed.statusCode != 200) {
+      return 'Server phân tích ảnh báo lỗi HTTP ${streamed.statusCode}: $body';
+    }
+    // Server thường trả JSON {"success":true,"result":"..."}; nếu không thì trả nguyên văn
+    try {
+      final m = jsonDecode(body);
+      if (m is Map && m['result'] != null) return m['result'].toString();
+    } catch (_) {}
+    return body;
+  }
+
   static int? _asInt(dynamic v) {
     if (v == null) return null;
     if (v is num) return v.toInt();
     return num.tryParse(v.toString().trim())?.toInt();
-  }
-
-  static bool? _asBool(dynamic v) {
-    if (v == null) return null;
-    if (v is bool) return v;
-    if (v is num) return v != 0;
-    final s = v.toString().trim().toLowerCase();
-    if (s == 'true' || s == '1' || s == 'on' || s == 'yes') return true;
-    if (s == 'false' || s == '0' || s == 'off' || s == 'no') return false;
-    return null;
-  }
-
-  Future<String> _runRobotSlug(String slug, {int repeat = 1}) async {
-    final action = RobonovaActionCatalog.findBySlugOrId(slug);
-    if (action == null) {
-      return 'Không tìm thấy động tác "$slug" trong bảng điều khiển MR-C3024FX.';
-    }
-    final sentUart = await robotDriver.executeAction(action, repeat: repeat);
-    return 'Mina đang thực hiện động tác "${action.nameVi}" (Mã ${action.id}, ASCII ${action.asciiByte}, '
-        'lặp $repeat lần, UART=${sentUart ? "Đã truyền tới MR-C3024FX" : "Mô phỏng"}).';
   }
 }
