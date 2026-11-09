@@ -77,6 +77,9 @@ class MainActivity : FlutterActivity() {
             System.loadLibrary("opus")
         } catch (_: Throwable) {
         }
+
+        // Khởi tạo bộ điều khiển động cơ bánh xe & servo cổ UBTECH Visbot
+        VisbotMotorController.init(this)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -203,6 +206,44 @@ class MainActivity : FlutterActivity() {
                         val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
                         val info = packageManager.resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY)
                         result.success(info?.activityInfo?.packageName == packageName)
+                    }
+                    "robotStatus" -> {
+                        if (!VisbotMotorController.isInitialized) {
+                            VisbotMotorController.init(this)
+                        }
+                        result.success(
+                            mapOf(
+                                "ready" to VisbotMotorController.isInitialized,
+                                "message" to VisbotMotorController.lastStatusMessage,
+                            )
+                        )
+                    }
+                    "robotMove" -> {
+                        if (!VisbotMotorController.isInitialized) {
+                            VisbotMotorController.init(this)
+                        }
+                        val dir = call.argument<String>("direction") ?: "forward"
+                        val durationMs = (call.argument<Number>("durationMs")?.toLong()) ?: 1500L
+                        val speed = call.argument<Number>("speed")?.toFloat()
+                        result.success(VisbotMotorController.move(dir, durationMs, speed))
+                    }
+                    "robotHead" -> {
+                        if (!VisbotMotorController.isInitialized) {
+                            VisbotMotorController.init(this)
+                        }
+                        val action = call.argument<String>("action") ?: "center"
+                        val angle = call.argument<Number>("angle")?.toFloat()
+                        val speed = call.argument<Number>("speed")?.toFloat()
+                        result.success(VisbotMotorController.head(action, angle, speed))
+                    }
+                    "robotStop" -> {
+                        result.success(VisbotMotorController.stop())
+                    }
+                    "robotDance" -> {
+                        if (!VisbotMotorController.isInitialized) {
+                            VisbotMotorController.init(this)
+                        }
+                        result.success(VisbotMotorController.dance())
                     }
                     else -> result.notImplemented()
                 }

@@ -19,6 +19,7 @@ class LauncherMenuScreen extends StatelessWidget {
           Navigator.of(context).pop();
           await brain.switchAssistant(a.id, startTalking: true);
         }, selected: a.id == brain.activeAssistant.id),
+      _Tile(Icons.gamepad_rounded, 'Đ.Khiển', const Color(0xFFF59E0B), () => _showRobotControl(context)),
       _Tile(Icons.radio_rounded, 'Radio', const Color(0xFF00F5A0), () => _showRadio(context)),
       _Tile(Icons.smart_display_rounded, 'YouTube', const Color(0xFFFF4D4D),
           () => MinaPlatform.openBrowser('https://m.youtube.com')),
@@ -94,6 +95,59 @@ class LauncherMenuScreen extends StatelessWidget {
             },
           ),
         ],
+      ),
+    );
+  }
+
+  void _showRobotControl(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF0F172A),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Điều khiển bánh xe & đầu Visbot',
+              style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              alignment: WrapAlignment.center,
+              children: [
+                _ctrlBtn('⬆ Tiến', const Color(0xFF10B981), () => MinaPlatform.robotMove('forward')),
+                _ctrlBtn('⬇ Lùi', const Color(0xFF10B981), () => MinaPlatform.robotMove('backward')),
+                _ctrlBtn('⬅ Trái', const Color(0xFF3B82F6), () => MinaPlatform.robotMove('turn_left', durationMs: 900)),
+                _ctrlBtn('➡ Phải', const Color(0xFF3B82F6), () => MinaPlatform.robotMove('turn_right', durationMs: 900)),
+                _ctrlBtn('⏹ Dừng', const Color(0xFFEF4444), () => MinaPlatform.robotStop()),
+                _ctrlBtn('Ngẩng', const Color(0xFFF59E0B), () => MinaPlatform.robotHead('up')),
+                _ctrlBtn('Thẳng', const Color(0xFFF59E0B), () => MinaPlatform.robotHead('center')),
+                _ctrlBtn('Cúi', const Color(0xFFF59E0B), () => MinaPlatform.robotHead('down')),
+                _ctrlBtn('Gật đầu', const Color(0xFFA855F7), () => MinaPlatform.robotHead('nod')),
+                _ctrlBtn('Nhảy múa', const Color(0xFFEC4899), () => MinaPlatform.robotDance()),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _ctrlBtn(String label, Color color, VoidCallback onTap) {
+    return SizedBox(
+      height: 28,
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color.withOpacity(0.25),
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          textStyle: const TextStyle(fontSize: 11),
+        ),
+        onPressed: onTap,
+        child: Text(label),
       ),
     );
   }

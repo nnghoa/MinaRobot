@@ -296,18 +296,45 @@ class MinaMcpServer {
       {
         'name': 'self.robot.move',
         'description':
-            'Yêu cầu robot di chuyển hoặc quay đầu. Hiện Mina CHƯA có quyền điều khiển bánh xe và đầu của '
-            'Visbot (do hệ thống UBTECH khóa); robot tự di chuyển theo chương trình gốc. Gọi công cụ này để '
-            'biết trạng thái và giải thích cho người dùng.',
+            'Điều khiển bánh xe của robot Visbot di chuyển (tiến, lùi, quay trái, quay phải, nhảy múa, hoặc dừng lại). '
+            'Dùng khi người dùng nói "tiến lên", "lùi lại", "quay trái", "quay phải", "xoay vòng", "nhảy một bài đi", "dừng lại".',
         'inputSchema': {
           'type': 'object',
           'properties': {
             'direction': {
               'type': 'string',
-              'enum': ['forward', 'backward', 'turn_left', 'turn_right', 'head_left', 'head_right', 'stop'],
+              'enum': ['forward', 'backward', 'turn_left', 'turn_right', 'dance', 'stop'],
+              'description': 'Hướng di chuyển của robot.',
+            },
+            'duration_ms': {
+              'type': 'integer',
+              'minimum': 300,
+              'maximum': 8000,
+              'description': 'Thời gian di chuyển tính bằng mili-giây (mặc định 1500ms = 1.5 giây).',
             },
           },
           'required': ['direction'],
+        },
+      },
+      {
+        'name': 'self.robot.head',
+        'description':
+            'Điều khiển đầu (cổ servo) của robot Visbot ngẩng lên, cúi xuống, nhìn thẳng, hoặc gật đầu. '
+            'Dùng khi người dùng nói "ngẩng đầu lên", "cúi đầu xuống", "nhìn thẳng", "gật đầu đi".',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'enum': ['up', 'down', 'center', 'nod'],
+              'description': 'up: ngẩng đầu (-23°), down: cúi đầu (+25°), center: nhìn thẳng (0°), nod: gật đầu.',
+            },
+            'angle': {
+              'type': 'number',
+              'description': 'Góc tùy chỉnh từ -23 (ngẩng lên tối đa) đến +25 (cúi xuống tối đa).',
+            },
+          },
+          'required': ['action'],
         },
       },
     ];
@@ -406,9 +433,16 @@ class MinaMcpServer {
         return 'Đã đặt âm lượng $vol%.';
 
       case 'self.robot.move':
-        return 'Mina chưa có quyền điều khiển bánh xe/đầu của robot Visbot: hệ thống UBTECH chỉ cho phép '
-            'ứng dụng có chữ ký của hãng. Robot vẫn tự di chuyển theo chương trình gốc. '
-            'Hãy giải thích ngắn gọn điều này cho người dùng.';
+        final dir = args['direction']?.toString() ?? 'forward';
+        final dur = (_asInt(args['duration_ms']) ?? 1500).clamp(300, 8000).toInt();
+        onEmotionChanged(MinaEmotion.happy);
+        return await MinaPlatform.robotMove(dir, durationMs: dur);
+
+      case 'self.robot.head':
+        final act = args['action']?.toString() ?? 'center';
+        final ang = _asInt(args['angle'])?.toDouble();
+        onEmotionChanged(MinaEmotion.happy);
+        return await MinaPlatform.robotHead(act, angle: ang);
 
       default:
         return 'Không tìm thấy công cụ $name.';

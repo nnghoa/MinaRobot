@@ -83,4 +83,42 @@ class MinaPlatform {
 
   static Future<bool> isDefaultLauncher() async =>
       await _ch.invokeMethod<bool>('isDefaultLauncher') ?? false;
+
+  // ---------- Điều khiển động cơ bánh xe & servo cổ UBTECH Visbot ----------
+  static Future<Map<String, dynamic>> robotStatus() async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('robotStatus');
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<String> robotMove(
+    String direction, {
+    int durationMs = 1500,
+    double? speed,
+  }) async {
+    return await _ch.invokeMethod<String>('robotMove', {
+          'direction': direction,
+          'durationMs': durationMs,
+          if (speed != null) 'speed': speed,
+        }) ??
+        '';
+  }
+
+  static Future<String> robotHead(
+    String action, {
+    double? angle,
+    double? speed,
+  }) async {
+    return await _ch.invokeMethod<String>('robotHead', {
+          'action': action,
+          if (angle != null) 'angle': angle,
+          if (speed != null) 'speed': speed,
+        }) ??
+        '';
+  }
+
+  static Future<String> robotStop() async =>
+      await _ch.invokeMethod<String>('robotStop') ?? '';
+
+  static Future<String> robotDance() async =>
+      await _ch.invokeMethod<String>('robotDance') ?? '';
 }
