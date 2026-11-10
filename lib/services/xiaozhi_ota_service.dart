@@ -30,7 +30,7 @@ class XiaozhiOtaResult {
 class XiaozhiOtaService {
   static const String defaultOtaUrl = 'https://api.tenclass.net/xiaozhi/ota/';
   static const String defaultWsUrl = 'wss://api.tenclass.net/xiaozhi/v1/';
-  static const String appVersion = '2.1.1';
+  static const String appVersion = '2.2.0';
 
   static const String _prefCustomWsKey = 'mina_custom_ws_url';
   static const String _prefCustomOtaKey = 'mina_custom_ota_url';

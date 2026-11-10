@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
+import '../models/robonova_actions.dart';
+
 /// Một kênh radio phát trực tiếp (HLS). Các link đã kiểm tra hoạt động ngày 09/11/2026.
 class RadioStation {
   final String id;
@@ -121,4 +123,66 @@ class MinaPlatform {
 
   static Future<String> robotDance() async =>
       await _ch.invokeMethod<String>('robotDance') ?? '';
+
+  // ---------- Điều khiển Robot hình người Robonova-II qua Bluetooth SPP (HC-06) ----------
+  static Future<void> openBluetoothSettings() => _ch.invokeMethod('openBluetoothSettings');
+
+  static Future<Map<String, dynamic>> btStatus() async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('btStatus');
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<Map<String, dynamic>> btScan({int durationMs = 4500}) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('btScan', {
+      'durationMs': durationMs,
+    });
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<Map<String, dynamic>> btConnect({String? address}) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('btConnect', {
+      if (address != null && address.isNotEmpty) 'address': address,
+    });
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<void> btDisconnect() => _ch.invokeMethod('btDisconnect');
+
+  static Future<Map<String, dynamic>> btSendAction(int asciiByte, {String label = ''}) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('btSendAction', {
+      'asciiByte': asciiByte,
+      'label': label,
+    });
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<Map<String, dynamic>> btSendSequence(
+    List<int> bytes,
+    List<int> delaysMs, {
+    String label = '',
+  }) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('btSendSequence', {
+      'bytes': bytes,
+      'delaysMs': delaysMs,
+      'label': label,
+    });
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  /// Thực thi 1 động tác hoặc 1 bài biểu diễn liên hoàn của Robot hình người Robonova-II qua Bluetooth
+  static Future<String> performRobonova(String query) async {
+    final combo = RobonovaActionCatalog.findCombo(query);
+    if (combo != null) {
+      final res = await btSendSequence(combo.bytes, combo.delaysMs, label: combo.nameVi);
+      return (res['message'] ?? 'Đã gửi bài biểu diễn ${combo.nameVi}').toString();
+    }
+
+    final act = RobonovaActionCatalog.resolveSingleAction(query);
+    if (act != null) {
+      final res = await btSendAction(act.asciiByte, label: '${act.nameVi} (${act.id})');
+      return (res['message'] ?? 'Đã gửi động tác ${act.nameVi}').toString();
+    }
+
+    return 'Không tìm thấy động tác "$query" trong danh mục 63 động tác Robonova-II.';
+  }
 }

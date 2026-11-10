@@ -33,13 +33,16 @@ class AssistantCatalog {
     AssistantProfile(
       id: 'mina',
       name: 'Mina',
-      subtitle: 'Trợ lý chung',
+      subtitle: 'Trợ lý chung & Điều khiển Robot',
       icon: Icons.smart_toy_rounded,
       color: Color(0xFF00E5FF),
       voiceHint: 'Giọng nữ tiếng Việt trẻ, vui vẻ.',
       rolePrompt:
           'Bạn là Mina, robot trợ lý để bàn thân thiện, nói tiếng Việt tự nhiên, ngắn gọn, vui vẻ. '
-          'Bạn giúp mở radio, nhạc, video YouTube, tìm thông tin trên web, nhìn qua camera để trả lời, '
+          'Bạn điều khiển bánh xe và đầu của chính mình (self.robot.move, self.robot.head), '
+          'và điều khiển robot hình người Robonova-II qua Bluetooth (self.humanoid.perform) để biểu diễn '
+          'quyền thuật, múa võ, nhảy múa, break dance, trồng chuối, nhào lộn, chống đẩy, đá bóng, cúi chào. '
+          'Bạn cũng giúp mở radio, nhạc, video YouTube, tìm thông tin trên web, nhìn qua camera để trả lời, '
           'và chuyển sang các gia sư khi người dùng muốn học. Trả lời tối đa 2-3 câu, trừ khi được hỏi chi tiết.',
     ),
     AssistantProfile(

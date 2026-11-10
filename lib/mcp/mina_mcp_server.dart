@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -337,6 +338,40 @@ class MinaMcpServer {
           'required': ['action'],
         },
       },
+      {
+        'name': 'self.humanoid.perform',
+        'description':
+            'Điều khiển robot hình người Robonova-II (kết nối qua Bluetooth HC-06) biểu diễn quyền thuật, '
+            'múa võ, nhảy múa, nhảy Break Dance, nhào lộn, trồng chuối, chống đẩy có nhạc, hít đất, đá bóng, '
+            'cúi chào, vỗ tay, bắt tay, hoặc đi lại (63 động tác K1..K68 và 4 bài liên hoàn). '
+            'Hãy gọi công cụ này ngay khi người dùng yêu cầu biểu diễn võ thuật, quyền thuật, nhảy múa, '
+            'trồng chuối, nhào lộn, chống đẩy, cúi chào, vỗ tay...',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'action': {
+              'type': 'string',
+              'description':
+                  'Tên bài biểu diễn hoặc động tác: '
+                  'Liên hoàn: "kungfu_show" (liên hoàn quyền thuật), "dance_show" (liên hoàn nhảy múa), '
+                  '"acrobatics_show" (nhào lộn & trồng chuối), "fitness_show" (thể lực chống đẩy). '
+                  'Võ thuật: "martial_arts_1" (khai quyền), "martial_arts_2", "martial_arts_3", "martial_arts_4", '
+                  '"martial_arts_5", "avoid_matrix" (né đòn Matrix), "big_toss" (tuyệt chiêu ném), '
+                  '"left_attack" (đấm trái), "right_attack" (đấm phải), "shoot_left_right" (sút bóng), "goalkeeper" (thủ môn). '
+                  'Nhảy & Nhào lộn: "dance_1", "dance_2", "dance_3", "break_dance", "handstand" (trồng chuối), '
+                  '"forward_tumbling" (lộn nhào trước), "backward_tumbling" (lộn nhào sau), '
+                  '"side_tumbling_left", "side_tumbling_right", "pushup_music" (chống đẩy có nhạc), '
+                  '"push_up" (hít đất), "single_foot_stand" (đứng 1 chân), "body_shake" (lắc thân). '
+                  'Chào hỏi: "bow" (cúi chào), "honor_bow" (chào danh dự), "hand_clap" (vỗ tay), '
+                  '"hand_shake" (bắt tay), "cheer_up" (cổ vũ), "wave_arms" (vẫy tay), "hands_up" (giơ 2 tay). '
+                  'Di chuyển: "walk_forward", "walk_backward", "fast_run", "turn_left", "turn_right", '
+                  '"climb_upstair" (leo cầu thang), "sit_down", "stand_up_from_front", "stand_up_from_back", '
+                  'hoặc mã K1..K68.',
+            },
+          },
+          'required': ['action'],
+        },
+      },
     ];
   }
 
@@ -436,6 +471,9 @@ class MinaMcpServer {
         final dir = args['direction']?.toString() ?? 'forward';
         final dur = (_asInt(args['duration_ms']) ?? 1500).clamp(300, 8000).toInt();
         onEmotionChanged(MinaEmotion.happy);
+        if (dir == 'dance') {
+          unawaited(MinaPlatform.performRobonova('dance_1'));
+        }
         return await MinaPlatform.robotMove(dir, durationMs: dur);
 
       case 'self.robot.head':
@@ -443,6 +481,24 @@ class MinaMcpServer {
         final ang = _asInt(args['angle'])?.toDouble();
         onEmotionChanged(MinaEmotion.happy);
         return await MinaPlatform.robotHead(act, angle: ang);
+
+      case 'self.humanoid.perform':
+        final act = args['action']?.toString() ?? 'bow';
+        final low = act.toLowerCase();
+        if (low.contains('martial') ||
+            low.contains('kungfu') ||
+            low.contains('attack') ||
+            low.contains('matrix') ||
+            low.contains('toss') ||
+            low.contains('võ') ||
+            low.contains('quyền')) {
+          onEmotionChanged(MinaEmotion.martial);
+        } else {
+          onEmotionChanged(MinaEmotion.happy);
+        }
+        // Visbot gật đầu hưởng ứng cùng lúc gửi lệnh Bluetooth sang robot người
+        unawaited(MinaPlatform.robotHead('nod'));
+        return await MinaPlatform.performRobonova(act);
 
       default:
         return 'Không tìm thấy công cụ $name.';

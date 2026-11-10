@@ -51,11 +51,23 @@ class MainActivity : FlutterActivity() {
             val moveDir = intent.getStringExtra("move")
             val headAct = intent.getStringExtra("head")
             val dur = intent.getLongExtra("durationMs", 1500L)
+            val btByte = intent.getIntExtra("btByte", -1)
+            val btConnectAddr = intent.getStringExtra("btConnect")
             if (!moveDir.isNullOrEmpty()) {
                 android.util.Log.i("VisbotMotor", "Broadcast move($moveDir) -> " + VisbotMotorController.move(moveDir, dur))
             }
             if (!headAct.isNullOrEmpty()) {
                 android.util.Log.i("VisbotMotor", "Broadcast head($headAct) -> " + VisbotMotorController.head(headAct))
+            }
+            if (!btConnectAddr.isNullOrEmpty() && context != null) {
+                RobonovaBluetoothController.connect(context, if (btConnectAddr == "auto") null else btConnectAddr) { ok, msg ->
+                    android.util.Log.i("RobonovaBT", "Broadcast btConnect($btConnectAddr) -> ok=$ok, $msg")
+                }
+            }
+            if (btByte in 40..108 && context != null) {
+                RobonovaBluetoothController.sendActionByte(context, btByte, "DEC-$btByte") { ok, msg ->
+                    android.util.Log.i("RobonovaBT", "Broadcast btByte($btByte) -> ok=$ok, $msg")
+                }
             }
         }
     }
@@ -268,6 +280,48 @@ class MainActivity : FlutterActivity() {
                             VisbotMotorController.init(this)
                         }
                         result.success(VisbotMotorController.dance())
+                    }
+                    "openBluetoothSettings" -> {
+                        if (!safeStart(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))) {
+                            safeStart(Intent(Settings.ACTION_SETTINGS))
+                        }
+                        result.success(true)
+                    }
+                    "btStatus" -> {
+                        result.success(RobonovaBluetoothController.getStatus(this))
+                    }
+                    "btScan" -> {
+                        val dur = (call.argument<Number>("durationMs")?.toLong()) ?: 4500L
+                        RobonovaBluetoothController.scanDevices(this, dur) { st ->
+                            result.success(st)
+                        }
+                    }
+                    "btConnect" -> {
+                        val addr = call.argument<String>("address")
+                        RobonovaBluetoothController.connect(this, addr) { ok, msg ->
+                            result.success(mapOf("ok" to ok, "message" to msg))
+                        }
+                    }
+                    "btDisconnect" -> {
+                        RobonovaBluetoothController.disconnect()
+                        result.success(true)
+                    }
+                    "btSendAction" -> {
+                        val asciiByte = call.argument<Int>("asciiByte") ?: 40
+                        val label = call.argument<String>("label") ?: "K1"
+                        RobonovaBluetoothController.sendActionByte(this, asciiByte, label) { ok, msg ->
+                            result.success(mapOf("ok" to ok, "message" to msg))
+                        }
+                    }
+                    "btSendSequence" -> {
+                        val bytesList = call.argument<List<Int>>("bytes") ?: listOf(40)
+                        val delaysList = call.argument<List<Number>>("delaysMs") ?: listOf(3000)
+                        val label = call.argument<String>("label") ?: "Combo"
+                        val bArr = bytesList.toIntArray()
+                        val dArr = LongArray(delaysList.size) { idx -> delaysList[idx].toLong() }
+                        RobonovaBluetoothController.sendActionSequence(this, bArr, dArr, label) { ok, msg ->
+                            result.success(mapOf("ok" to ok, "message" to msg))
+                        }
                     }
                     else -> result.notImplemented()
                 }
