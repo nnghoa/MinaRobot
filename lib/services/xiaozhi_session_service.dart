@@ -400,6 +400,16 @@ class MinaBrainController extends ChangeNotifier {
         } else if (state == 'sentence_start') {
           final text = msg['text']?.toString() ?? '';
           if (text.isNotEmpty) {
+            // Nếu kênh định danh hiện tại bị máy chủ khóa ("违反用户协议" / "禁止使用"),
+            // lập tức ngắt âm thanh, tự động xoay sang kênh tiếng Việt tiếp theo và kết nối lại!
+            if (text.contains('禁止使用') || text.contains('违反用户协议')) {
+              _addLog('OTA', 'Kênh $_deviceMac bị khóa, tự động chuyển sang kênh tiếng Việt tiếp theo...');
+              await audioService.stopAndFlushPlayer();
+              await _disconnectSocketOnly();
+              await otaService.rotateBuiltinDevice(_activeAssistantId);
+              unawaited(startVoiceConversation());
+              return;
+            }
             _subtitle = text;
             _addLog(activeAssistant.name.toUpperCase(), text);
             notifyListeners();

@@ -38,7 +38,7 @@ class XiaozhiOtaResult {
 class XiaozhiOtaService {
   static const String defaultOtaUrl = 'https://api.tenclass.net/xiaozhi/ota/';
   static const String defaultWsUrl = 'wss://api.tenclass.net/xiaozhi/v1/';
-  static const String appVersion = '2.2.1';
+  static const String appVersion = '2.2.2';
 
   static const String _prefCustomWsKey = 'mina_custom_ws_url';
   static const String _prefCustomOtaKey = 'mina_custom_ota_url';
@@ -47,7 +47,6 @@ class XiaozhiOtaService {
   /// Kho định danh (MAC + UUID) đã kích hoạt sẵn theo từng vai trò trợ lý tiếng Việt.
   static const Map<String, List<XiaozhiDeviceIdentity>> _builtinPools = {
     'mina': [
-      XiaozhiDeviceIdentity('16:bc:68:59:5e:51', 'c4b22a99-25b9-d9d2-341f-39acbebb80e3'),
       XiaozhiDeviceIdentity('ba:86:4d:ae:b9:50', '8bb7f819-1194-3a30-5464-49a5cbd8a2fd'),
       XiaozhiDeviceIdentity('fe:88:a4:5f:0d:ac', 'fc0474fb-ac45-01d4-5dba-d6b19109fe42'),
       XiaozhiDeviceIdentity('b2:5d:ea:8c:98:52', '0c033d57-073e-232f-8f0f-72265c0bdfe8'),
@@ -93,13 +92,12 @@ class XiaozhiOtaService {
       XiaozhiDeviceIdentity('46:ba:c9:62:b4:9b', 'e6688a81-dd5d-44b4-2f36-aa42d8389195'),
     ],
     'ke_chuyen': [
-      XiaozhiDeviceIdentity('72:8e:de:33:40:76', '6d0b8d0d-941c-ab73-7f41-fb778bacd480'),
-      XiaozhiDeviceIdentity('0a:4f:ce:55:97:02', '9dde4fdd-60d3-6ffc-57be-022dac34ad69'),
-      XiaozhiDeviceIdentity('f2:77:82:6b:7c:6c', 'a3421055-dcda-3ff8-0c46-c81c9d6f7416'),
-      XiaozhiDeviceIdentity('1a:03:e7:d3:2d:19', '14788d8a-e21d-a59e-d9b9-0ed248883a6c'),
-      XiaozhiDeviceIdentity('2e:e1:77:26:88:e3', '8228644d-1f10-6c55-9cde-0d011c527c0b'),
-      XiaozhiDeviceIdentity('f6:34:c6:ed:86:12', 'd1be9a9f-9d7c-beff-60d4-5497dd8edc95'),
-      XiaozhiDeviceIdentity('8e:77:94:9e:11:f5', 'bc6d69cf-9ef1-23f1-3546-403c0dbc5b6c'),
+      XiaozhiDeviceIdentity('e2:44:97:e6:9f:8b', '987d9c58-2544-ff0a-c48c-68a36fa031c4'),
+      XiaozhiDeviceIdentity('7a:b2:6d:b5:22:39', 'dc189e7d-c37e-7f0f-63e4-e31cca262362'),
+      XiaozhiDeviceIdentity('da:8e:c2:87:a8:27', 'a54e8211-94da-5035-89c6-e5078f15c9df'),
+      XiaozhiDeviceIdentity('e2:8f:36:4a:c2:b5', 'ecf648ae-faba-1265-f1df-25e420571509'),
+      XiaozhiDeviceIdentity('8e:23:5f:92:b3:86', '1f3c3639-edfb-d35b-f6e7-e4d85e2edd1c'),
+      XiaozhiDeviceIdentity('56:79:e9:ad:44:90', 'd3c9fe1b-5aaf-803c-57c4-3ae8c59efd52'),
     ],
   };
 
