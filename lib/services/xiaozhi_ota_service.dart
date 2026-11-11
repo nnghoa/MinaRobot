@@ -38,7 +38,7 @@ class XiaozhiOtaResult {
 class XiaozhiOtaService {
   static const String defaultOtaUrl = 'https://api.tenclass.net/xiaozhi/ota/';
   static const String defaultWsUrl = 'wss://api.tenclass.net/xiaozhi/v1/';
-  static const String appVersion = '2.2.2';
+  static const String appVersion = '2.2.3';
 
   static const String _prefCustomWsKey = 'mina_custom_ws_url';
   static const String _prefCustomOtaKey = 'mina_custom_ota_url';
@@ -167,7 +167,12 @@ class XiaozhiOtaService {
   }
 
   /// Kiểm tra OTA & tự động dùng thiết bị đã kích hoạt sẵn (xoay vòng nếu cần).
-  Future<XiaozhiOtaResult> checkOtaAndPairing(String profileId) async {
+  /// Khi dùng kho tích hợp sẵn (`!useCustom`) và không bắt buộc kiểm tra từ xa (`!forceRemoteCheck`),
+  /// trả kết quả ngay lập tức (0ms) để kết nối thẳng WebSocket cực nhanh mà không tốn thời gian gọi HTTP OTA.
+  Future<XiaozhiOtaResult> checkOtaAndPairing(
+    String profileId, {
+    bool forceRemoteCheck = false,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     final useCustom = prefs.getBool(_prefUseCustomPairing) ?? false;
     final customWs = (prefs.getString(_prefCustomWsKey) ?? '').trim();
@@ -178,6 +183,15 @@ class XiaozhiOtaService {
       return XiaozhiOtaResult(
         wsUrl: customWs,
         wsToken: 'mina-local-token',
+        deviceMac: identity.mac,
+        clientId: identity.uuid,
+      );
+    }
+
+    if (!useCustom && !forceRemoteCheck) {
+      return XiaozhiOtaResult(
+        wsUrl: defaultWsUrl,
+        wsToken: 'test-token',
         deviceMac: identity.mac,
         clientId: identity.uuid,
       );
@@ -247,7 +261,7 @@ class XiaozhiOtaService {
             },
             body: jsonEncode(payload),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 5));
 
       if (resp.statusCode == 200) {
         final map = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;

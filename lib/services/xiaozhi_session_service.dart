@@ -19,6 +19,7 @@ import 'xiaozhi_ota_service.dart';
 /// - Chờ từ khóa "Mina" / "Chào Mina" / "Mina ơi" bằng Sherpa-ONNX offline
 /// - Đàm thoại hai chiều qua WebSocket XiaoZhi + Opus
 /// - Nhiều trợ lý (Mina, gia sư Toán/Văn/Tiếng Anh, kể chuyện), mỗi trợ lý một thiết bị XiaoZhi riêng
+/// - Chuyển trợ lý tức thì (Kiểu A: ~0.5s, không chặn bởi HTTP OTA hay socket cũ)
 /// - Tự giảm/tạm dừng radio khi đang nói chuyện, phát tiếp khi xong
 class MinaBrainController extends ChangeNotifier {
   static const String _prefActiveAssistant = 'mina_active_assistant';
@@ -47,6 +48,8 @@ class MinaBrainController extends ChangeNotifier {
   bool _sendingMicOpus = false;
   bool _mediaPausedByMina = false;
   bool _endSessionAfterTts = false;
+  int _connectEpoch = 0;
+  Timer? _connectWatchdog;
   Timer? _endSessionFallback;
   StreamSubscription<Uint8List>? _micSub;
 
@@ -112,26 +115,34 @@ class MinaBrainController extends ChangeNotifier {
     _enterWakeWordStandby();
   }
 
-  /// Đổi trợ lý đang hoạt động. Nếu [startTalking] = true thì kết nối và để trợ lý mới chào luôn.
+  /// Đổi trợ lý đang hoạt động theo chế độ chuyển tức thì (Kiểu A):
+  /// ngắt phiên cũ không chặn (non-blocking), bỏ qua HTTP OTA và mở thẳng WebSocket lắng nghe ngay (~0.5s).
   Future<void> switchAssistant(String id, {bool startTalking = false}) async {
     final target = AssistantCatalog.byId(id);
-    _addLog('ASSISTANT', 'Chuyển sang ${target.name}');
-    await closeVoiceSession();
+    _addLog('ASSISTANT', 'Chuyển nhanh sang ${target.name}');
+    _connectEpoch++;
+    _sendingMicOpus = false;
+    unawaited(audioService.stopAndFlushPlayer());
+    await _disconnectSocketOnly();
+
     _activeAssistantId = target.id;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefActiveAssistant, target.id);
-    await refreshOtaStatus();
-    if (startTalking && _pairingCode == null) {
-      await startVoiceConversation(
-        initialPromptText: 'Xin chào, hãy giới thiệu ngắn gọn bằng tiếng Việt bạn là ${target.name}.',
-      );
+    unawaited(
+      SharedPreferences.getInstance().then((prefs) => prefs.setString(_prefActiveAssistant, target.id)),
+    );
+
+    if (startTalking) {
+      await startVoiceConversation();
     } else {
+      await refreshOtaStatus();
       _enterWakeWordStandby();
     }
   }
 
-  Future<void> refreshOtaStatus() async {
-    final ota = await otaService.checkOtaAndPairing(_activeAssistantId);
+  Future<void> refreshOtaStatus({bool forceRemoteCheck = false}) async {
+    final ota = await otaService.checkOtaAndPairing(
+      _activeAssistantId,
+      forceRemoteCheck: forceRemoteCheck,
+    );
     _deviceMac = ota.deviceMac;
     _clientId = ota.clientId;
     _pairingCode = (ota.activationCode?.isNotEmpty ?? false) ? ota.activationCode : null;
@@ -164,7 +175,7 @@ class MinaBrainController extends ChangeNotifier {
   /// Kiểm tra trạng thái ghép nối của tất cả trợ lý (dùng cho màn hình Cài đặt).
   Future<void> refreshAllPairing() async {
     for (final a in AssistantCatalog.all) {
-      final ota = await otaService.checkOtaAndPairing(a.id);
+      final ota = await otaService.checkOtaAndPairing(a.id, forceRemoteCheck: true);
       _pairingByAssistant[a.id] =
           (ota.activationCode?.isNotEmpty ?? false) ? ota.activationCode : null;
       if (a.id == _activeAssistantId) {
@@ -198,13 +209,13 @@ class MinaBrainController extends ChangeNotifier {
     startVoiceConversation(wakeWordText: cleanWord);
   }
 
-  /// Chạm vào khuôn mặt: bắt đầu nói chuyện / ngắt lời / kết thúc
+  /// Chạm vào khuôn mặt: bắt đầu nói chuyện / ngắt lời / kết thúc (hoặc hủy kết nối đang treo)
   Future<void> onFaceTapped() async {
     if (_status == MinaVoiceStatus.aiSpeaking) {
       await abortCurrentSpeechAndListen();
       return;
     }
-    if (_status == MinaVoiceStatus.listeningUser) {
+    if (_status == MinaVoiceStatus.listeningUser || _status == MinaVoiceStatus.connectingCloud) {
       await closeVoiceSession();
       return;
     }
@@ -244,17 +255,26 @@ class MinaBrainController extends ChangeNotifier {
     });
   }
 
-  Future<void> startVoiceConversation({String? wakeWordText, String? initialPromptText}) async {
+  Future<void> startVoiceConversation({
+    String? wakeWordText,
+    String? initialPromptText,
+    int retryCount = 0,
+  }) async {
+    final myEpoch = ++_connectEpoch;
+    _connectWatchdog?.cancel();
     _pendingPromptText = initialPromptText;
+    _sendingMicOpus = false;
     wakeWordService.setEnabled(false);
     _status = MinaVoiceStatus.connectingCloud;
     _emotion = MinaEmotion.thinking;
     _subtitle = '${activeAssistant.name} đang kết nối...';
     notifyListeners();
 
-    await _pauseMediaForConversation();
+    unawaited(_pauseMediaForConversation());
 
     final ota = await otaService.checkOtaAndPairing(_activeAssistantId);
+    if (myEpoch != _connectEpoch) return;
+
     _deviceMac = ota.deviceMac;
     _clientId = ota.clientId;
     if (ota.activationCode != null && ota.activationCode!.isNotEmpty) {
@@ -274,9 +294,27 @@ class MinaBrainController extends ChangeNotifier {
     await _disconnectSocketOnly();
     mcpServer.resetSession();
 
+    // Chống treo tuyệt đối khi Wi-Fi khách sạn chuyển AP (roaming) hoặc mất gói tin hello
+    _connectWatchdog = Timer(const Duration(seconds: 6), () {
+      if (myEpoch != _connectEpoch || _status != MinaVoiceStatus.connectingCloud) return;
+      _addLog('WS', 'Quá 6s chờ bắt tay (${activeAssistant.name}), tự động kết nối lại...');
+      unawaited(_disconnectSocketOnly());
+      if (retryCount < 1) {
+        unawaited(
+          startVoiceConversation(
+            wakeWordText: wakeWordText,
+            initialPromptText: initialPromptText,
+            retryCount: retryCount + 1,
+          ),
+        );
+      } else {
+        _enterWakeWordStandby();
+      }
+    });
+
     try {
-      _addLog('WS', 'Kết nối tới ${ota.wsUrl}...');
-      _ws = await WebSocket.connect(
+      _addLog('WS', 'Kết nối nhanh ${activeAssistant.name} (MAC ${ota.deviceMac})...');
+      final sock = await WebSocket.connect(
         ota.wsUrl,
         headers: {
           'Authorization': 'Bearer ${ota.wsToken}',
@@ -284,19 +322,27 @@ class MinaBrainController extends ChangeNotifier {
           'Device-Id': ota.deviceMac,
           'Client-Id': ota.clientId,
         },
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 5));
 
-      final thisSocket = _ws;
-      _ws!.listen(
-        _onSocketData,
+      if (myEpoch != _connectEpoch) {
+        unawaited(
+          sock.close().timeout(const Duration(milliseconds: 300), onTimeout: () => null).catchError((_) => null),
+        );
+        return;
+      }
+
+      sock.pingInterval = const Duration(seconds: 10);
+      _ws = sock;
+
+      sock.listen(
+        (dynamic data) => _onSocketData(sock, data),
         onDone: () {
-          // Bỏ qua sự kiện của socket cũ (ví dụ khi vừa chuyển trợ lý)
-          if (!identical(thisSocket, _ws) && _ws != null) return;
+          if (!identical(sock, _ws)) return;
           _addLog('WS', 'Phiên đàm thoại kết thúc.');
           _enterWakeWordStandby();
         },
         onError: (Object err) {
-          if (!identical(thisSocket, _ws) && _ws != null) return;
+          if (!identical(sock, _ws)) return;
           _addLog('WS', 'Lỗi WebSocket: $err');
           _enterWakeWordStandby();
         },
@@ -317,15 +363,81 @@ class MinaBrainController extends ChangeNotifier {
         },
       });
     } catch (e) {
+      if (myEpoch != _connectEpoch) return;
+      _connectWatchdog?.cancel();
+      _connectWatchdog = null;
       _addLog('WS', 'Không kết nối được máy chủ giọng nói: $e');
+      if (retryCount < 1) {
+        unawaited(
+          startVoiceConversation(
+            wakeWordText: wakeWordText,
+            initialPromptText: initialPromptText,
+            retryCount: retryCount + 1,
+          ),
+        );
+        return;
+      }
       _status = MinaVoiceStatus.error;
-      _subtitle = 'Chưa kết nối được mạng/server. Gọi "Mina" để thử lại nhé!';
+      _subtitle = 'Chưa kết nối được mạng/server. Gọi "Mina" hoặc chạm màn hình để thử lại nhé!';
       notifyListeners();
-      Future<void>.delayed(const Duration(seconds: 3), _enterWakeWordStandby);
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        if (myEpoch == _connectEpoch) _enterWakeWordStandby();
+      });
     }
   }
 
-  Future<void> _onSocketData(dynamic data) async {
+  /// Nhận diện trực tiếp các câu lệnh giọng nói đổi trợ lý ("Quay lại Mina", "Chuyển sang Gia sư Toán"...)
+  /// để chuyển tức thì (< 0.5s) mà không bị phụ thuộc vào việc LLM trên server có gọi MCP hay không.
+  String? _matchVoiceSwitchTarget(String rawText) {
+    final s = rawText.trim().toLowerCase();
+    if (s.isEmpty) return null;
+
+    const switchVerbs = [
+      'quay lại',
+      'quay về',
+      'trở lại',
+      'trở về',
+      'về với',
+      'chuyển sang',
+      'chuyển qua',
+      'đổi sang',
+      'đổi qua',
+      'cho gặp',
+      'muốn gặp',
+      'gặp ',
+      'gọi ',
+      'switch to',
+      'back to',
+      'return to',
+    ];
+    final hasSwitchIntent = switchVerbs.any((v) => s.contains(v));
+    if (!hasSwitchIntent) return null;
+
+    if (s.contains('tiếng anh') || s.contains('anh văn') || s.contains('english')) {
+      return 'gia_su_tieng_anh';
+    }
+    if (s.contains('gia sư toán') || s.contains('thầy toán') || s.contains('cô toán') || s.contains('môn toán')) {
+      return 'gia_su_toan';
+    }
+    if (s.contains('gia sư văn') ||
+        s.contains('ngữ văn') ||
+        s.contains('tiếng việt') ||
+        s.contains('cô văn') ||
+        s.contains('môn văn')) {
+      return 'gia_su_van';
+    }
+    if (s.contains('kể chuyện') || s.contains('đọc truyện') || s.contains('cổ tích')) {
+      return 'ke_chuyen';
+    }
+    if (s.contains('mina') || s.contains('mi na')) {
+      return 'mina';
+    }
+    return null;
+  }
+
+  Future<void> _onSocketData(WebSocket sourceSocket, dynamic data) async {
+    if (!identical(sourceSocket, _ws)) return;
+
     // 1. Âm thanh Opus từ AI -> giải mã và phát
     if (data is List<int>) {
       final opusBytes = data is Uint8List ? data : Uint8List.fromList(data);
@@ -348,20 +460,32 @@ class MinaBrainController extends ChangeNotifier {
     final type = msg['type']?.toString() ?? '';
     switch (type) {
       case 'hello':
+        _connectWatchdog?.cancel();
+        _connectWatchdog = null;
         _sessionId = msg['session_id']?.toString() ?? '';
         final audioParams = (msg['audio_params'] as Map?)?.cast<String, dynamic>();
         final serverSampleRate = (audioParams?['sample_rate'] as num?)?.toInt() ?? 24000;
         opusCodec.initDecoder(serverSampleRate);
         await audioService.initPlayer(serverSampleRate);
-        _addLog('WS', 'Bắt tay thành công! session=$_sessionId, TTS=${serverSampleRate}Hz');
+        if (!identical(sourceSocket, _ws)) return;
+
+        _addLog('WS', 'Bắt tay xong (${activeAssistant.name})! session=$_sessionId');
         final prompt = _pendingPromptText;
         _pendingPromptText = null;
         if (prompt != null && prompt.isNotEmpty) {
+          _subtitle = '${activeAssistant.name} đang phản hồi...';
+          notifyListeners();
           _sendJson({
             'session_id': _sessionId,
             'type': 'listen',
             'state': 'detect',
             'text': prompt,
+          });
+          // Nếu máy chủ bỏ qua detect text quá 5s thì chuyển ngay sang lắng nghe để không bao giờ kẹt
+          _connectWatchdog = Timer(const Duration(seconds: 5), () {
+            if (identical(sourceSocket, _ws) && _status == MinaVoiceStatus.connectingCloud) {
+              _startListeningTurn();
+            }
           });
         } else {
           _startListeningTurn();
@@ -377,6 +501,13 @@ class MinaBrainController extends ChangeNotifier {
           _sendingMicOpus = false;
           _addLog('STT', text);
           notifyListeners();
+
+          final fastTarget = _matchVoiceSwitchTarget(text);
+          if (fastTarget != null && fastTarget != _activeAssistantId) {
+            _addLog('ASSISTANT', 'Chuyển tức thì qua giọng nói -> $fastTarget');
+            unawaited(switchAssistant(fastTarget, startTalking: true));
+            return;
+          }
         }
         break;
 
@@ -391,6 +522,8 @@ class MinaBrainController extends ChangeNotifier {
       case 'tts':
         final state = msg['state']?.toString() ?? '';
         if (state == 'start') {
+          _connectWatchdog?.cancel();
+          _connectWatchdog = null;
           _sendingMicOpus = false;
           _status = MinaVoiceStatus.aiSpeaking;
           if (_emotion == MinaEmotion.listening || _emotion == MinaEmotion.thinking) {
@@ -417,6 +550,7 @@ class MinaBrainController extends ChangeNotifier {
         } else if (state == 'stop') {
           // Chờ đuôi âm thanh phát hết rồi nghe lượt tiếp theo
           await Future<void>.delayed(const Duration(milliseconds: 450));
+          if (!identical(sourceSocket, _ws)) return;
           if (_endSessionAfterTts) {
             _endSessionAfterTts = false;
             _endSessionFallback?.cancel();
@@ -433,6 +567,7 @@ class MinaBrainController extends ChangeNotifier {
         final payload = (msg['payload'] as Map?)?.cast<String, dynamic>();
         if (payload != null) {
           final rpcResponse = await mcpServer.handleJsonRpc(payload);
+          if (!identical(sourceSocket, _ws)) return;
           if (rpcResponse != null) {
             _sendJson({
               'session_id': _sessionId,
@@ -451,6 +586,8 @@ class MinaBrainController extends ChangeNotifier {
 
   void _startListeningTurn() {
     if (_ws == null || _ws!.readyState != WebSocket.open) return;
+    _connectWatchdog?.cancel();
+    _connectWatchdog = null;
     _status = MinaVoiceStatus.listeningUser;
     _emotion = MinaEmotion.listening;
     _subtitle = '${activeAssistant.name} đang lắng nghe...';
@@ -477,6 +614,7 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   Future<void> closeVoiceSession() async {
+    _connectEpoch++;
     _sendingMicOpus = false;
     await audioService.stopAndFlushPlayer();
     await _disconnectSocketOnly();
@@ -484,6 +622,8 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   void _enterWakeWordStandby() {
+    _connectWatchdog?.cancel();
+    _connectWatchdog = null;
     _sendingMicOpus = false;
     _status = _pairingCode != null ? MinaVoiceStatus.pairingRequired : MinaVoiceStatus.standbyWakeWord;
     _emotion = MinaEmotion.idle;
@@ -496,13 +636,16 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   Future<void> _disconnectSocketOnly() async {
+    _connectWatchdog?.cancel();
+    _connectWatchdog = null;
     final old = _ws;
     _ws = null;
     _sessionId = '';
     if (old != null) {
-      try {
-        await old.close();
-      } catch (_) {}
+      // Đóng bất đồng bộ có giới hạn thời gian để không bao giờ bị kẹt khi Wi-Fi đổi trạm phát (AP roaming)
+      unawaited(
+        old.close().timeout(const Duration(milliseconds: 400), onTimeout: () => null).catchError((_) => null),
+      );
     }
   }
 
@@ -522,6 +665,7 @@ class MinaBrainController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _connectWatchdog?.cancel();
     _endSessionFallback?.cancel();
     _micSub?.cancel();
     _disconnectSocketOnly();

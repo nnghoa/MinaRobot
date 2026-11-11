@@ -382,9 +382,9 @@ class MinaMcpServer {
         if (target.id == activeAssistantId()) {
           return 'Bạn đang là ${target.name} rồi.';
         }
-        // Chuyển sau một nhịp để server kịp nhận kết quả và nói câu chuyển tiếp
-        Future<void>.delayed(const Duration(milliseconds: 2500), () => onSwitchAssistant(target.id));
-        return 'Đang chuyển sang ${target.name}. Hãy nói một câu ngắn như "Mình chuyển sang ${target.name} nhé" rồi dừng.';
+        // Chuyển nhanh sau một nhịp ngắn để server kịp nhận phản hồi MCP
+        Future<void>.delayed(const Duration(milliseconds: 900), () => onSwitchAssistant(target.id));
+        return 'Đang chuyển ngay sang ${target.name}. Hãy nói cực ngắn "Chuyển sang ${target.name} nhé!" rồi dừng.';
 
       case 'self.camera.take_photo':
         return _takePhotoAndExplain(args['question']?.toString() ?? 'Trong ảnh có gì?');
