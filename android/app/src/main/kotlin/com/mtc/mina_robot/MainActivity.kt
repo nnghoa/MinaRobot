@@ -41,6 +41,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var platformChannel: MethodChannel? = null
 
     private val robotCmdReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -53,6 +54,8 @@ class MainActivity : FlutterActivity() {
             val dur = intent.getLongExtra("durationMs", 1500L)
             val btByte = intent.getIntExtra("btByte", -1)
             val btConnectAddr = intent.getStringExtra("btConnect")
+            val sayText = intent.getStringExtra("say")
+            val assistantId = intent.getStringExtra("assistant")
             if (!moveDir.isNullOrEmpty()) {
                 android.util.Log.i("VisbotMotor", "Broadcast move($moveDir) -> " + VisbotMotorController.move(moveDir, dur))
             }
@@ -67,6 +70,14 @@ class MainActivity : FlutterActivity() {
             if (btByte in 40..108 && context != null) {
                 RobonovaBluetoothController.sendActionByte(context, btByte, "DEC-$btByte") { ok, msg ->
                     android.util.Log.i("RobonovaBT", "Broadcast btByte($btByte) -> ok=$ok, $msg")
+                }
+            }
+            if (!sayText.isNullOrEmpty() || !assistantId.isNullOrEmpty()) {
+                mainHandler.post {
+                    platformChannel?.invokeMethod(
+                        "onBroadcastCommand",
+                        mapOf("say" to sayText, "assistant" to assistantId)
+                    )
                 }
             }
         }
@@ -166,8 +177,9 @@ class MainActivity : FlutterActivity() {
             }
 
         // 3. Media, trình duyệt, camera, cài đặt hệ thống
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
-            .setMethodCallHandler { call, result ->
+        val pCh = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PLATFORM_CHANNEL)
+        platformChannel = pCh
+        pCh.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "mediaPlay" -> result.success(
                         mediaPlay(call.argument<String>("url") ?: "", call.argument<String>("title") ?: "")

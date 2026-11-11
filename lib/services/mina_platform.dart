@@ -40,6 +40,17 @@ class RadioCatalog {
 class MinaPlatform {
   static const MethodChannel _ch = MethodChannel('com.mtc.mina_robot/platform');
 
+  static void setBroadcastCommandHandler(
+    Future<void> Function(String? say, String? assistant) handler,
+  ) {
+    _ch.setMethodCallHandler((call) async {
+      if (call.method == 'onBroadcastCommand') {
+        final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? const {};
+        await handler(args['say']?.toString(), args['assistant']?.toString());
+      }
+    });
+  }
+
   // ---------- Media (radio / nhạc qua URL) ----------
   static Future<bool> mediaPlay(String url, {String title = ''}) async =>
       await _ch.invokeMethod<bool>('mediaPlay', {'url': url, 'title': title}) ?? false;

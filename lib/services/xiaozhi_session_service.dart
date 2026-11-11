@@ -43,6 +43,7 @@ class MinaBrainController extends ChangeNotifier {
 
   WebSocket? _ws;
   String _sessionId = '';
+  String? _pendingPromptText;
   bool _sendingMicOpus = false;
   bool _mediaPausedByMina = false;
   bool _endSessionAfterTts = false;
@@ -98,6 +99,15 @@ class MinaBrainController extends ChangeNotifier {
 
     _micSub = audioService.pcm16kFrames.listen(_onPcmFrameFromMic);
 
+    MinaPlatform.setBroadcastCommandHandler((say, assistant) async {
+      if (assistant != null && assistant.isNotEmpty) {
+        await switchAssistant(assistant, startTalking: say == null || say.isEmpty);
+      }
+      if (say != null && say.isNotEmpty) {
+        await startVoiceConversation(initialPromptText: say);
+      }
+    });
+
     await refreshOtaStatus();
     _enterWakeWordStandby();
   }
@@ -112,7 +122,9 @@ class MinaBrainController extends ChangeNotifier {
     await prefs.setString(_prefActiveAssistant, target.id);
     await refreshOtaStatus();
     if (startTalking && _pairingCode == null) {
-      await startVoiceConversation(wakeWordText: 'Xin chào ${target.name}');
+      await startVoiceConversation(
+        initialPromptText: 'Xin chào, hãy giới thiệu ngắn gọn bằng tiếng Việt bạn là ${target.name}.',
+      );
     } else {
       _enterWakeWordStandby();
     }
@@ -130,6 +142,21 @@ class MinaBrainController extends ChangeNotifier {
       _addLog('OTA', '${activeAssistant.name} (MAC $_deviceMac) cần ghép nối, mã: $_pairingCode');
     } else {
       _addLog('OTA', '${activeAssistant.name} (MAC $_deviceMac) đã sẵn sàng.');
+    }
+    notifyListeners();
+  }
+
+  /// Xoay sang thiết bị kích hoạt sẵn tiếp theo trong kho của trợ lý [profileId].
+  Future<void> rotateAssistantDevice(String profileId) async {
+    final next = await otaService.rotateBuiltinDevice(profileId);
+    _addLog('OTA', 'Đổi kênh kết nối $profileId -> MAC ${next.mac}');
+    final ota = await otaService.checkOtaAndPairing(profileId);
+    _pairingByAssistant[profileId] =
+        (ota.activationCode?.isNotEmpty ?? false) ? ota.activationCode : null;
+    if (profileId == _activeAssistantId) {
+      _deviceMac = ota.deviceMac;
+      _clientId = ota.clientId;
+      _pairingCode = _pairingByAssistant[profileId];
     }
     notifyListeners();
   }
@@ -217,7 +244,8 @@ class MinaBrainController extends ChangeNotifier {
     });
   }
 
-  Future<void> startVoiceConversation({String? wakeWordText}) async {
+  Future<void> startVoiceConversation({String? wakeWordText, String? initialPromptText}) async {
+    _pendingPromptText = initialPromptText;
     wakeWordService.setEnabled(false);
     _status = MinaVoiceStatus.connectingCloud;
     _emotion = MinaEmotion.thinking;
@@ -326,7 +354,18 @@ class MinaBrainController extends ChangeNotifier {
         opusCodec.initDecoder(serverSampleRate);
         await audioService.initPlayer(serverSampleRate);
         _addLog('WS', 'Bắt tay thành công! session=$_sessionId, TTS=${serverSampleRate}Hz');
-        _startListeningTurn();
+        final prompt = _pendingPromptText;
+        _pendingPromptText = null;
+        if (prompt != null && prompt.isNotEmpty) {
+          _sendJson({
+            'session_id': _sessionId,
+            'type': 'listen',
+            'state': 'detect',
+            'text': prompt,
+          });
+        } else {
+          _startListeningTurn();
+        }
         break;
 
       case 'stt':

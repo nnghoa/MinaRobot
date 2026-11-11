@@ -18,6 +18,7 @@ class MinaSettingsScreen extends StatefulWidget {
 class _MinaSettingsScreenState extends State<MinaSettingsScreen> {
   bool _checking = false;
   bool _isLauncher = false;
+  bool _useCustomPairing = false;
   final _wsCtrl = TextEditingController();
 
   @override
@@ -29,7 +30,13 @@ class _MinaSettingsScreenState extends State<MinaSettingsScreen> {
   Future<void> _load() async {
     _wsCtrl.text = await widget.brain.otaService.getCustomWsUrl();
     final l = await MinaPlatform.isDefaultLauncher();
-    if (mounted) setState(() => _isLauncher = l);
+    final customPair = await widget.brain.otaService.getUseCustomPairing();
+    if (mounted) {
+      setState(() {
+        _isLauncher = l;
+        _useCustomPairing = customPair;
+      });
+    }
   }
 
   Future<void> _checkAll() async {
@@ -77,13 +84,21 @@ class _MinaSettingsScreenState extends State<MinaSettingsScreen> {
                     ),
                   ],
                 ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(4, 0, 4, 6),
-                  child: Text(
-                    'Mỗi trợ lý là một thiết bị riêng trên xiaozhi.me. Tạo một agent cho từng trợ lý, '
-                    'chọn giọng theo gợi ý, dán "Vai trò", rồi thêm thiết bị bằng mã 6 số bên dưới.',
+                SwitchListTile(
+                  dense: true,
+                  value: !_useCustomPairing,
+                  title: const Text('Dùng tài khoản tích hợp sẵn (Không cần đăng ký)',
+                      style: TextStyle(color: Colors.white, fontSize: 12)),
+                  subtitle: const Text(
+                    'Tự động kết nối cho cả 5 trợ lý mà không cần tạo tài khoản xiaozhi.me',
                     style: label,
                   ),
+                  onChanged: (useBuiltin) async {
+                    final custom = !useBuiltin;
+                    await widget.brain.otaService.setUseCustomPairing(custom);
+                    if (mounted) setState(() => _useCustomPairing = custom);
+                    await _checkAll();
+                  },
                 ),
                 for (final a in AssistantCatalog.all)
                   _assistantCard(a, pairing.containsKey(a.id), pairing[a.id]),
@@ -161,13 +176,21 @@ class _MinaSettingsScreenState extends State<MinaSettingsScreen> {
           const SizedBox(height: 4),
           const Text('Vai trò (dán vào agent):', style: TextStyle(color: Colors.white70, fontSize: 11)),
           SelectableText(a.rolePrompt, style: const TextStyle(color: Colors.white, fontSize: 11)),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton.icon(
-              icon: const Icon(Icons.copy_rounded, size: 14),
-              label: const Text('Sao chép', style: TextStyle(fontSize: 11)),
-              onPressed: () => Clipboard.setData(ClipboardData(text: a.rolePrompt)),
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (!_useCustomPairing)
+                TextButton.icon(
+                  icon: const Icon(Icons.sync_rounded, size: 14),
+                  label: const Text('Đổi kênh kết nối', style: TextStyle(fontSize: 11)),
+                  onPressed: () => widget.brain.rotateAssistantDevice(a.id),
+                ),
+              TextButton.icon(
+                icon: const Icon(Icons.copy_rounded, size: 14),
+                label: const Text('Sao chép', style: TextStyle(fontSize: 11)),
+                onPressed: () => Clipboard.setData(ClipboardData(text: a.rolePrompt)),
+              ),
+            ],
           ),
         ],
       ),
