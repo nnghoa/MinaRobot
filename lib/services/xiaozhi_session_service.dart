@@ -45,6 +45,7 @@ class MinaBrainController extends ChangeNotifier {
   WebSocket? _ws;
   String _sessionId = '';
   String? _pendingPromptText;
+  String? _ignoreSttEchoText;
   bool _sendingMicOpus = false;
   bool _mediaPausedByMina = false;
   bool _endSessionAfterTts = false;
@@ -115,8 +116,8 @@ class MinaBrainController extends ChangeNotifier {
     _enterWakeWordStandby();
   }
 
-  /// Đổi trợ lý đang hoạt động theo chế độ chuyển tức thì (Kiểu A):
-  /// ngắt phiên cũ không chặn (non-blocking), bỏ qua HTTP OTA và mở thẳng WebSocket lắng nghe ngay (~0.5s).
+  /// Đổi trợ lý đang hoạt động:
+  /// ngắt phiên cũ không chặn (non-blocking), bỏ qua HTTP OTA, mở thẳng WebSocket và để trợ lý mới tự chào ngay (~1.2–2s).
   Future<void> switchAssistant(String id, {bool startTalking = false}) async {
     final target = AssistantCatalog.byId(id);
     _addLog('ASSISTANT', 'Chuyển nhanh sang ${target.name}');
@@ -131,7 +132,8 @@ class MinaBrainController extends ChangeNotifier {
     );
 
     if (startTalking) {
-      await startVoiceConversation();
+      // Dùng từ khóa ngắn "Xin chào" chuẩn giao thức detect để máy chủ phát lời chào ngay (~0.4s vào TTS)
+      await startVoiceConversation(initialPromptText: 'Xin chào');
     } else {
       await refreshOtaStatus();
       _enterWakeWordStandby();
@@ -473,7 +475,8 @@ class MinaBrainController extends ChangeNotifier {
         final prompt = _pendingPromptText;
         _pendingPromptText = null;
         if (prompt != null && prompt.isNotEmpty) {
-          _subtitle = '${activeAssistant.name} đang phản hồi...';
+          _ignoreSttEchoText = prompt;
+          _subtitle = '${activeAssistant.name} đang chào bạn...';
           notifyListeners();
           _sendJson({
             'session_id': _sessionId,
@@ -481,13 +484,15 @@ class MinaBrainController extends ChangeNotifier {
             'state': 'detect',
             'text': prompt,
           });
-          // Nếu máy chủ bỏ qua detect text quá 5s thì chuyển ngay sang lắng nghe để không bao giờ kẹt
-          _connectWatchdog = Timer(const Duration(seconds: 5), () {
+          // Nếu Wi-Fi đổi AP làm rớt gói tin quá 4s chưa phát tiếng thì tự mở mic lắng nghe, không bao giờ kẹt
+          _connectWatchdog = Timer(const Duration(seconds: 4), () {
             if (identical(sourceSocket, _ws) && _status == MinaVoiceStatus.connectingCloud) {
+              _ignoreSttEchoText = null;
               _startListeningTurn();
             }
           });
         } else {
+          _ignoreSttEchoText = null;
           _startListeningTurn();
         }
         break;
@@ -495,6 +500,13 @@ class MinaBrainController extends ChangeNotifier {
       case 'stt':
         final text = msg['text']?.toString() ?? '';
         if (text.isNotEmpty) {
+          // Ẩn bản tin STT phản chiếu từ chính gói kích hoạt câu chào tự động ("Xin chào")
+          if (_ignoreSttEchoText != null &&
+              text.trim().toLowerCase() == _ignoreSttEchoText!.trim().toLowerCase()) {
+            _ignoreSttEchoText = null;
+            break;
+          }
+          _ignoreSttEchoText = null;
           _lastUserSpeech = text;
           _subtitle = 'Bạn: "$text"';
           _emotion = MinaEmotion.thinking;
@@ -543,8 +555,9 @@ class MinaBrainController extends ChangeNotifier {
               unawaited(startVoiceConversation());
               return;
             }
-            _subtitle = text;
-            _addLog(activeAssistant.name.toUpperCase(), text);
+            final cleanSubtitle = text.replaceAll(RegExp(r'lily', caseSensitive: false), activeAssistant.name);
+            _subtitle = cleanSubtitle;
+            _addLog(activeAssistant.name.toUpperCase(), cleanSubtitle);
             notifyListeners();
           }
         } else if (state == 'stop') {
