@@ -25,8 +25,18 @@ class LauncherMenuScreen extends StatelessWidget {
       _Tile(Icons.gamepad_rounded, 'Đ.Khiển Xe', const Color(0xFFF59E0B),
           () => _showRobotControl(context)),
       _Tile(Icons.radio_rounded, 'Radio', const Color(0xFF00F5A0), () => _showRadio(context)),
-      _Tile(Icons.smart_display_rounded, 'YouTube', const Color(0xFFFF4D4D),
-          () => MinaPlatform.openBrowser('https://m.youtube.com')),
+      _Tile(Icons.library_music_rounded, 'Zing MP3', const Color(0xFFA855F7), () async {
+        await MinaPlatform.mediaStop();
+        await MinaPlatform.openZingMp3();
+      }),
+      _Tile(Icons.smart_display_rounded, 'YouTube', const Color(0xFFFF4D4D), () async {
+        await MinaPlatform.mediaStop();
+        await MinaPlatform.openYoutube();
+      }),
+      _Tile(Icons.bedtime_rounded, 'Tắt màn hình', const Color(0xFF38BDF8), () {
+        Navigator.of(context).pop();
+        MinaPlatform.setScreenBlackout(true);
+      }),
       _Tile(Icons.public_rounded, 'Trình duyệt', const Color(0xFF60A5FA),
           () => MinaPlatform.openBrowser('https://www.google.com')),
       _Tile(Icons.wifi_rounded, 'Wi-Fi', Colors.white70, MinaPlatform.openWifiSettings),

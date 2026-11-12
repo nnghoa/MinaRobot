@@ -71,10 +71,35 @@ class MinaPlatform {
     return (m ?? const {}).cast<String, dynamic>();
   }
 
-  // ---------- Trình duyệt chặn quảng cáo ----------
+  // ---------- Trình duyệt chặn quảng cáo, YouTube không quảng cáo & Zing MP3 ----------
   static Future<void> openBrowser(String url) => _ch.invokeMethod('openBrowser', {'url': url});
 
   static Future<void> closeBrowser() => _ch.invokeMethod('closeBrowser');
+
+  static Future<Map<String, dynamic>> openYoutube({String? query, String? url}) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('openYoutube', {
+      if (query != null && query.isNotEmpty) 'query': query,
+      if (url != null && url.isNotEmpty) 'url': url,
+    });
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<Map<String, dynamic>> openZingMp3({String? query}) async {
+    final m = await _ch.invokeMethod<Map<dynamic, dynamic>>('openZingMp3', {
+      if (query != null && query.isNotEmpty) 'query': query,
+    });
+    return (m ?? const {}).cast<String, dynamic>();
+  }
+
+  static Future<void> setScreenBlackout(bool enable) =>
+      _ch.invokeMethod('screenBlackout', {'enable': enable});
+
+  static Future<void> holdAudioFocus() => _ch.invokeMethod('holdAudioFocus');
+
+  static Future<void> releaseAudioFocus() => _ch.invokeMethod('releaseAudioFocus');
+
+  static Future<void> externalMediaControl(String action) =>
+      _ch.invokeMethod('externalMediaControl', {'action': action});
 
   // ---------- Camera ----------
   /// Chụp một ảnh JPEG từ camera trước. Trả về null nếu không chụp được.

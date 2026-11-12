@@ -1,5 +1,7 @@
 package com.mtc.mina_robot
 
+import android.annotation.SuppressLint
+import android.app.SearchManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -7,7 +9,10 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
+import android.graphics.drawable.GradientDrawable
 import android.hardware.Camera
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -16,15 +21,23 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.NoiseSuppressor
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -104,6 +117,17 @@ class MainActivity : FlutterActivity() {
     private var mediaTitle = ""
     private var mediaUrl = ""
     private var mediaVolume = 1.0f
+
+    // Nút nổi điều hướng nhanh [🏠 Mina | 🌙 Tắt màn] khi mở Zing MP3 / NewPipe & lớp phủ tắt màn hình nghe nhạc
+    private var floatingPillView: View? = null
+    private var systemBlackoutView: View? = null
+    private var localBlackoutView: View? = null
+    private val transientAudioFocusListener = AudioManager.OnAudioFocusChangeListener { }
+
+    override fun onResume() {
+        super.onResume()
+        hideFloatingNavOverlay()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -235,19 +259,47 @@ class MainActivity : FlutterActivity() {
                         BrowserActivity.current?.get()?.finish()
                         result.success(true)
                     }
+                    "openYoutube" -> {
+                        val query = call.argument<String>("query")
+                        val url = call.argument<String>("url")
+                        result.success(openAdFreeYoutube(query, url))
+                    }
+                    "openZingMp3" -> {
+                        val query = call.argument<String>("query")
+                        result.success(openZingMp3App(query))
+                    }
+                    "screenBlackout" -> {
+                        val enable = call.argument<Boolean>("enable") ?: true
+                        if (enable) enterScreenBlackout() else exitScreenBlackout()
+                        result.success(true)
+                    }
+                    "holdAudioFocus" -> {
+                        holdTransientAudioFocus()
+                        result.success(true)
+                    }
+                    "releaseAudioFocus" -> {
+                        releaseTransientAudioFocus()
+                        result.success(true)
+                    }
+                    "externalMediaControl" -> {
+                        val action = call.argument<String>("action") ?: "pause"
+                        dispatchExternalMediaKey(action)
+                        result.success(true)
+                    }
                     "takePhoto" -> takePhoto(result)
                     "openWifiSettings" -> {
-                        safeStart(Intent(Settings.ACTION_WIFI_SETTINGS))
+                        if (safeStart(Intent(Settings.ACTION_WIFI_SETTINGS))) showFloatingNavOverlay()
                         result.success(true)
                     }
                     "openSystemSettings" -> {
-                        safeStart(Intent(Settings.ACTION_SETTINGS))
+                        if (safeStart(Intent(Settings.ACTION_SETTINGS))) showFloatingNavOverlay()
                         result.success(true)
                     }
                     "openHomeSettings" -> {
                         if (!safeStart(Intent(Settings.ACTION_HOME_SETTINGS))) {
                             safeStart(Intent(Settings.ACTION_SETTINGS))
                         }
+                        showFloatingNavOverlay()
                         result.success(true)
                     }
                     "isDefaultLauncher" -> {
@@ -297,6 +349,7 @@ class MainActivity : FlutterActivity() {
                         if (!safeStart(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))) {
                             safeStart(Intent(Settings.ACTION_SETTINGS))
                         }
+                        showFloatingNavOverlay()
                         result.success(true)
                     }
                     "btStatus" -> {
@@ -347,6 +400,349 @@ class MainActivity : FlutterActivity() {
             true
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    // ------------------------------------------------------------------ YouTube Không Quảng Cáo & Zing MP3 + Tắt Màn Hình
+
+    private fun isPackageInstalled(pkg: String): Boolean {
+        return try {
+            packageManager.getPackageInfo(pkg, 0)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Ưu tiên mở ứng dụng YouTube không quảng cáo & phát nền (NewPipe / Tubular).
+     * Nếu chưa cài đặt thì tự động mở trình duyệt tích hợp đã chặn quảng cáo & cho phép phát nền.
+     */
+    private fun openAdFreeYoutube(query: String?, directUrl: String?): Map<String, Any> {
+        val candidates = listOf("org.schabi.newpipe", "org.polymorphicshade.tubular")
+        val installedPkg = candidates.firstOrNull { isPackageInstalled(it) }
+
+        if (installedPkg != null) {
+            val targetUri = when {
+                !directUrl.isNullOrBlank() -> Uri.parse(directUrl)
+                !query.isNullOrBlank() -> Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(query)}")
+                else -> null
+            }
+            var launched = false
+            if (targetUri != null) {
+                launched = safeStart(Intent(Intent.ACTION_VIEW, targetUri).setPackage(installedPkg))
+            }
+            if (!launched) {
+                val launchIntent = packageManager.getLaunchIntentForPackage(installedPkg)
+                if (launchIntent != null) launched = safeStart(launchIntent)
+            }
+            if (launched) {
+                showFloatingNavOverlay()
+                return mapOf("ok" to true, "mode" to "newpipe", "package" to installedPkg)
+            }
+        }
+
+        val fallbackUrl = when {
+            !directUrl.isNullOrBlank() -> directUrl
+            !query.isNullOrBlank() -> "https://m.youtube.com/results?search_query=${Uri.encode(query)}"
+            else -> "https://m.youtube.com"
+        }
+        startActivity(
+            Intent(this, BrowserActivity::class.java)
+                .putExtra(BrowserActivity.EXTRA_URL, fallbackUrl)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+        return mapOf("ok" to true, "mode" to "webview", "url" to fallbackUrl)
+    }
+
+    /**
+     * Mở ứng dụng Zing MP3 (com.zing.mp3) hỗ trợ phát nhạc nền khi tắt màn hình.
+     * Nếu chưa cài APK Zing MP3 thì mở m.zingmp3.vn trong trình duyệt phát nền.
+     */
+    private fun openZingMp3App(query: String?): Map<String, Any> {
+        val pkg = "com.zing.mp3"
+        if (isPackageInstalled(pkg)) {
+            var launched = false
+            if (!query.isNullOrBlank()) {
+                val playSearch = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+                    setPackage(pkg)
+                    putExtra(SearchManager.QUERY, query)
+                }
+                launched = safeStart(playSearch)
+                if (!launched) {
+                    val searchIntent = Intent(Intent.ACTION_SEARCH).apply {
+                        setPackage(pkg)
+                        putExtra(SearchManager.QUERY, query)
+                    }
+                    launched = safeStart(searchIntent)
+                }
+            }
+            if (!launched) {
+                val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+                if (launchIntent != null) launched = safeStart(launchIntent)
+            }
+            if (launched) {
+                showFloatingNavOverlay()
+                return mapOf("ok" to true, "mode" to "zing_app")
+            }
+        }
+
+        val fallbackUrl = if (!query.isNullOrBlank()) {
+            "https://m.zingmp3.vn/tim-kiem/tat-ca?q=${Uri.encode(query)}"
+        } else {
+            "https://m.zingmp3.vn"
+        }
+        startActivity(
+            Intent(this, BrowserActivity::class.java)
+                .putExtra(BrowserActivity.EXTRA_URL, fallbackUrl)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        )
+        return mapOf("ok" to true, "mode" to "webview", "url" to fallbackUrl)
+    }
+
+    private fun canDrawSystemOverlay(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
+    }
+
+    private fun overlayWindowType(): Int {
+        @Suppress("DEPRECATION")
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
+    }
+
+    /**
+     * Thanh nổi nhỏ [🏠 | 🌙] ở góc trên phải màn hình 308x240 khi đang mở Zing MP3 / NewPipe / Cài đặt:
+     * - 🏠: Quay về khuôn mặt Mina (nhạc nền vẫn tiếp tục phát).
+     * - 🌙: Tắt tối đen màn hình ngay để nghe nhạc tiết kiệm pin, chạm bất kỳ đâu để bật lại.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun showFloatingNavOverlay() {
+        if (!canDrawSystemOverlay() || floatingPillView != null) return
+        try {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val density = resources.displayMetrics.density
+            val pill = LinearLayout(applicationContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                background = GradientDrawable().apply {
+                    setColor(0xCC0F172A.toInt())
+                    cornerRadius = 14f * density
+                    setStroke((1 * density).toInt().coerceAtLeast(1), 0x6600E5FF)
+                }
+                val padH = (4 * density).toInt()
+                setPadding(padH, 0, padH, 0)
+            }
+
+            val btnW = (30 * density).toInt()
+            val btnH = (26 * density).toInt()
+
+            val homeBtn = TextView(applicationContext).apply {
+                text = "🏠"
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setOnClickListener {
+                    hideFloatingNavOverlay()
+                    val backHome = Intent(this@MainActivity, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    }
+                    safeStart(backHome)
+                }
+            }
+
+            val sleepBtn = TextView(applicationContext).apply {
+                text = "🌙"
+                textSize = 12f
+                gravity = Gravity.CENTER
+                setOnClickListener { enterScreenBlackout() }
+            }
+
+            pill.addView(homeBtn, LinearLayout.LayoutParams(btnW, btnH))
+            pill.addView(sleepBtn, LinearLayout.LayoutParams(btnW, btnH))
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                overlayWindowType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+                x = (4 * density).toInt()
+                y = (4 * density).toInt()
+            }
+
+            // Cho phép kéo thanh nổi nếu che nút của ứng dụng bên dưới
+            var downRawX = 0f
+            var downRawY = 0f
+            var startX = 0
+            var startY = 0
+            pill.setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downRawX = ev.rawX
+                        downRawY = ev.rawY
+                        startX = params.x
+                        startY = params.y
+                        false
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = (ev.rawX - downRawX).toInt()
+                        val dy = (ev.rawY - downRawY).toInt()
+                        if (kotlin.math.abs(dx) > 6 || kotlin.math.abs(dy) > 6) {
+                            params.x = (startX - dx).coerceAtLeast(0)
+                            params.y = (startY + dy).coerceAtLeast(0)
+                            try {
+                                wm.updateViewLayout(pill, params)
+                            } catch (_: Throwable) {
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    else -> false
+                }
+            }
+
+            wm.addView(pill, params)
+            floatingPillView = pill
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun hideFloatingNavOverlay() {
+        val v = floatingPillView ?: return
+        floatingPillView = null
+        try {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            wm.removeView(v)
+        } catch (_: Throwable) {
+        }
+    }
+
+    /** Tắt tối đen màn hình (hạ độ sáng đèn nền về 0 + phủ đen toàn màn) nhưng giữ nhạc nền phát liên tục. */
+    private fun enterScreenBlackout() {
+        if (canDrawSystemOverlay()) {
+            if (systemBlackoutView != null) return
+            try {
+                val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                val hint = TextView(applicationContext).apply {
+                    text = "🌙 Đang phát nhạc tắt màn hình\nChạm bất kỳ đâu để sáng lại"
+                    textSize = 12f
+                    setTextColor(0x99FFFFFF.toInt())
+                    gravity = Gravity.CENTER
+                }
+                val cover = FrameLayout(applicationContext).apply {
+                    setBackgroundColor(Color.BLACK)
+                    isClickable = true
+                    isFocusable = true
+                    addView(hint, FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        Gravity.CENTER
+                    ))
+                    setOnClickListener { exitScreenBlackout() }
+                }
+                hint.postDelayed({ hint.animate().alpha(0f).setDuration(600).start() }, 1600)
+
+                val params = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    overlayWindowType(),
+                    WindowManager.LayoutParams.FLAG_FULLSCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.OPAQUE
+                ).apply {
+                    screenBrightness = 0.0f
+                }
+                wm.addView(cover, params)
+                systemBlackoutView = cover
+                return
+            } catch (_: Throwable) {
+            }
+        }
+
+        // Dự phòng nội bộ trên cửa sổ MainActivity nếu chưa cấp quyền SYSTEM_ALERT_WINDOW
+        if (localBlackoutView != null) return
+        val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val lp = window.attributes
+        lp.screenBrightness = 0.0f
+        window.attributes = lp
+
+        val cover = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            isClickable = true
+            setOnClickListener { exitScreenBlackout() }
+        }
+        localBlackoutView = cover
+        content.addView(cover, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+    }
+
+    private fun exitScreenBlackout() {
+        systemBlackoutView?.let { v ->
+            systemBlackoutView = null
+            try {
+                val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                wm.removeView(v)
+            } catch (_: Throwable) {
+            }
+        }
+        localBlackoutView?.let { v ->
+            localBlackoutView = null
+            try {
+                findViewById<ViewGroup>(android.R.id.content)?.removeView(v)
+            } catch (_: Throwable) {
+            }
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val lp = window.attributes
+            lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            window.attributes = lp
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun holdTransientAudioFocus() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.requestAudioFocus(
+                transientAudioFocusListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+            )
+        } catch (_: Throwable) {
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun releaseTransientAudioFocus() {
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.abandonAudioFocus(transientAudioFocusListener)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun dispatchExternalMediaKey(action: String) {
+        val keyCode = when (action) {
+            "pause" -> KeyEvent.KEYCODE_MEDIA_PAUSE
+            "resume", "play" -> KeyEvent.KEYCODE_MEDIA_PLAY
+            "stop" -> KeyEvent.KEYCODE_MEDIA_STOP
+            "next" -> KeyEvent.KEYCODE_MEDIA_NEXT
+            "previous" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            else -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+        }
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+        } catch (_: Throwable) {
         }
     }
 
@@ -697,6 +1093,9 @@ class MainActivity : FlutterActivity() {
             unregisterReceiver(robotCmdReceiver)
         } catch (_: Throwable) {
         }
+        hideFloatingNavOverlay()
+        exitScreenBlackout()
+        releaseTransientAudioFocus()
         stopMicCapture()
         stopPcmPlayerInternal()
         mediaStop()

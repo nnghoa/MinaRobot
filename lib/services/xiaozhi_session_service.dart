@@ -226,6 +226,7 @@ class MinaBrainController extends ChangeNotifier {
 
   Future<void> _pauseMediaForConversation() async {
     try {
+      await MinaPlatform.holdAudioFocus();
       final st = await MinaPlatform.mediaState();
       if (st['playing'] == true) {
         await MinaPlatform.mediaPause();
@@ -235,6 +236,9 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   Future<void> _resumeMediaAfterConversation() async {
+    try {
+      await MinaPlatform.releaseAudioFocus();
+    } catch (_) {}
     if (!_mediaPausedByMina) return;
     _mediaPausedByMina = false;
     try {

@@ -203,13 +203,13 @@ class MinaMcpServer {
       },
       {
         'name': 'self.media.control',
-        'description': 'Điều khiển nhạc/radio đang phát: tạm dừng, phát tiếp, hoặc tắt hẳn.',
+        'description': 'Điều khiển nhạc/radio/Zing MP3/YouTube đang phát: tạm dừng, phát tiếp, bài tiếp theo, bài trước, hoặc tắt hẳn.',
         'inputSchema': {
           'type': 'object',
           'properties': {
             'action': {
               'type': 'string',
-              'enum': ['pause', 'resume', 'stop', 'status'],
+              'enum': ['pause', 'resume', 'stop', 'next', 'previous', 'status'],
             },
           },
           'required': ['action'],
@@ -218,14 +218,41 @@ class MinaMcpServer {
       {
         'name': 'self.youtube.search',
         'description':
-            'Mở YouTube và tìm video / bài hát theo từ khóa trên màn hình robot. Dùng khi người dùng '
-            'muốn xem video, nghe một bài hát cụ thể, hoặc xem hoạt hình.',
+            'Mở YouTube không quảng cáo (hỗ trợ phát nền khi tắt màn hình) và tìm video / bài hát theo từ khóa trên màn hình robot. '
+            'Dùng khi người dùng muốn xem YouTube, xem hoạt hình hoặc nghe nhạc trên YouTube.',
         'inputSchema': {
           'type': 'object',
           'properties': {
             'query': {'type': 'string', 'description': 'Từ khóa tìm kiếm, ví dụ "nhạc thiếu nhi"'},
           },
           'required': ['query'],
+        },
+      },
+      {
+        'name': 'self.music.zingmp3',
+        'description':
+            'Mở ứng dụng Zing MP3 để nghe nhạc tiếng Việt chất lượng cao (hỗ trợ phát nhạc nền khi tắt màn hình). '
+            'Dùng khi người dùng nói "mở Zing MP3", "nghe nhạc trên Zing", "bật nhạc Zing bài...".',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'query': {
+              'type': 'string',
+              'description': 'Tên bài hát, ca sĩ hoặc thể loại muốn tìm trên Zing MP3 (để trống nếu chỉ mở ứng dụng).',
+            },
+          },
+        },
+      },
+      {
+        'name': 'self.screen.sleep',
+        'description':
+            'Tắt tối đen màn hình của robot để nghe nhạc tiết kiệm điện / đỡ chói mắt mà nhạc vẫn phát bình thường '
+            '(dùng khi người dùng nói "tắt màn hình", "tối màn hình đi"). Chạm vào màn hình sẽ sáng lại.',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {
+            'enable': {'type': 'boolean', 'description': 'true = tắt màn hình, false = bật sáng lại'},
+          },
         },
       },
       {
@@ -411,27 +438,55 @@ class MinaMcpServer {
         switch (action) {
           case 'pause':
             await MinaPlatform.mediaPause();
-            return 'Đã tạm dừng.';
+            await MinaPlatform.externalMediaControl('pause');
+            return 'Đã tạm dừng nhạc/radio.';
           case 'resume':
             await MinaPlatform.mediaResume();
+            await MinaPlatform.externalMediaControl('resume');
             await onMediaStarted();
             return 'Sẽ phát tiếp sau câu trả lời.';
           case 'stop':
             await MinaPlatform.mediaStop();
+            await MinaPlatform.externalMediaControl('stop');
             return 'Đã tắt nhạc/radio.';
+          case 'next':
+            await MinaPlatform.externalMediaControl('next');
+            await onMediaStarted();
+            return 'Đã chuyển sang bài tiếp theo.';
+          case 'previous':
+            await MinaPlatform.externalMediaControl('previous');
+            await onMediaStarted();
+            return 'Đã quay lại bài trước.';
           default:
             final st = await MinaPlatform.mediaState();
-            return st['playing'] == true ? 'Đang phát: ${st['title'] ?? ''}' : 'Không có gì đang phát.';
+            return st['playing'] == true ? 'Đang phát: ${st['title'] ?? ''}' : 'Không có radio đang phát.';
         }
 
       case 'self.youtube.search':
         final q = args['query']?.toString() ?? '';
         await MinaPlatform.mediaStop();
-        await MinaPlatform.openBrowser(
-            'https://m.youtube.com/results?search_query=${Uri.encodeQueryComponent(q)}');
+        final res = await MinaPlatform.openYoutube(query: q);
         // Kết thúc phiên sau câu trả lời để mic không thu tiếng video
         await onMediaStarted();
-        return 'Đã mở kết quả YouTube cho "$q" trên màn hình. Người dùng chạm vào video để xem. Hãy xác nhận thật ngắn.';
+        final mode = res['mode'] == 'newpipe' ? 'YouTube không quảng cáo (NewPipe)' : 'YouTube chặn quảng cáo';
+        return 'Đã mở $mode tìm "$q" trên màn hình (có nút 🌙 tắt màn hình nghe nền). Hãy xác nhận thật ngắn.';
+
+      case 'self.music.zingmp3':
+        final q = args['query']?.toString() ?? '';
+        await MinaPlatform.mediaStop();
+        await MinaPlatform.openZingMp3(query: q.isEmpty ? null : q);
+        await onMediaStarted();
+        return q.isEmpty
+            ? 'Đã mở ứng dụng Zing MP3 (hỗ trợ phát nhạc nền khi tắt màn hình). Hãy xác nhận thật ngắn.'
+            : 'Đã mở Zing MP3 tìm "$q" (hỗ trợ phát nhạc nền khi tắt màn hình). Hãy xác nhận thật ngắn.';
+
+      case 'self.screen.sleep':
+        final enable = args['enable'] != false;
+        await MinaPlatform.setScreenBlackout(enable);
+        if (enable) await onMediaStarted();
+        return enable
+            ? 'Đã tắt tối màn hình (nhạc vẫn phát bình thường, chạm màn hình để bật lại). Hãy xác nhận thật ngắn.'
+            : 'Đã bật sáng lại màn hình.';
 
       case 'self.web.search':
         final q = args['query']?.toString() ?? '';
