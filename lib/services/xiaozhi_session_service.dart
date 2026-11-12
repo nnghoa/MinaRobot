@@ -46,6 +46,8 @@ class MinaBrainController extends ChangeNotifier {
   String _sessionId = '';
   String? _pendingPromptText;
   String? _ignoreSttEchoText;
+  String? _customListeningSubtitle;
+  DateTime _ttsStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _sendingMicOpus = false;
   bool _mediaPausedByMina = false;
   bool _endSessionAfterTts = false;
@@ -62,6 +64,10 @@ class MinaBrainController extends ChangeNotifier {
   String get deviceMac => _deviceMac;
   List<MinaLogEntry> get logs => List.unmodifiable(_logs);
   AssistantProfile get activeAssistant => AssistantCatalog.byId(_activeAssistantId);
+  bool get isInConversation =>
+      _status == MinaVoiceStatus.aiSpeaking ||
+      _status == MinaVoiceStatus.listeningUser ||
+      _status == MinaVoiceStatus.connectingCloud;
 
   /// Mã ghép nối đã biết của từng trợ lý (null = đã ghép nối hoặc chưa kiểm tra)
   Map<String, String?> get pairingByAssistant => Map.unmodifiable(_pairingByAssistant);
@@ -78,6 +84,7 @@ class MinaBrainController extends ChangeNotifier {
         notifyListeners();
       },
       onSwitchAssistant: (id) => switchAssistant(id, startTalking: true),
+      onResetTopic: () => resetTopicAndListen(reason: 'MCP reset_topic'),
       onMediaStarted: _onMediaStartedByTool,
       deviceMac: () => _deviceMac,
       clientId: () => _clientId,
@@ -103,7 +110,11 @@ class MinaBrainController extends ChangeNotifier {
 
     _micSub = audioService.pcm16kFrames.listen(_onPcmFrameFromMic);
 
-    MinaPlatform.setBroadcastCommandHandler((say, assistant) async {
+    MinaPlatform.setBroadcastCommandHandler((say, assistant, resetTopic) async {
+      if (resetTopic) {
+        await resetTopicAndListen(reason: 'Broadcast resetTopic');
+        return;
+      }
       if (assistant != null && assistant.isNotEmpty) {
         await switchAssistant(assistant, startTalking: say == null || say.isEmpty);
       }
@@ -188,8 +199,10 @@ class MinaBrainController extends ChangeNotifier {
   }
 
   void _onPcmFrameFromMic(Uint8List pcmBytes) {
-    // 1. Chế độ chờ: đưa âm thanh vào Sherpa-ONNX để bắt từ khóa "Mina"
-    if (_status == MinaVoiceStatus.standbyWakeWord || _status == MinaVoiceStatus.pairingRequired) {
+    // 1. Chế độ chờ hoặc đang phát giọng AI (barge-in): đưa âm thanh vào Sherpa-ONNX để bắt khẩu lệnh
+    if (_status == MinaVoiceStatus.standbyWakeWord ||
+        _status == MinaVoiceStatus.pairingRequired ||
+        _status == MinaVoiceStatus.aiSpeaking) {
       wakeWordService.feedPcm16(pcmBytes);
       return;
     }
@@ -205,13 +218,29 @@ class MinaBrainController extends ChangeNotifier {
 
   void _handleWakeWordTriggered(String keyword) {
     final cleanWord = keyword.replaceAll('@', '').replaceAll('_', ' ');
+
+    // Khi AI đang nói (barge-in): bỏ qua từ đơn "@Mina" và 900ms đầu câu chào để tránh loa tự kích hoạt chính mình,
+    // chỉ cắt lời khi người dùng gọi cụm rõ ràng ("Mina ơi", "Chào Mina", "Đổi chủ đề", "Mina dừng lại").
+    if (_status == MinaVoiceStatus.aiSpeaking) {
+      if (keyword == '@Mina') return;
+      if (DateTime.now().difference(_ttsStartedAt).inMilliseconds < 900) return;
+
+      if (keyword == '@Đổi_chủ_đề' || keyword == '@Mina_dừng_lại') {
+        unawaited(resetTopicAndListen(reason: 'Khẩu lệnh ngắt lời "$cleanWord"'));
+      } else {
+        _addLog('KWS', 'Ngắt lời AI bằng khẩu lệnh "$cleanWord"');
+        unawaited(abortCurrentSpeechAndListen());
+      }
+      return;
+    }
+
     _subtitle = 'Dạ, ${activeAssistant.name} nghe đây!';
     _emotion = MinaEmotion.surprised;
     notifyListeners();
     startVoiceConversation(wakeWordText: cleanWord);
   }
 
-  /// Chạm vào khuôn mặt: bắt đầu nói chuyện / ngắt lời / kết thúc (hoặc hủy kết nối đang treo)
+  /// Chạm vào khuôn mặt: bắt đầu nói chuyện / ngắt lời giữ mạch bài học / kết thúc
   Future<void> onFaceTapped() async {
     if (_status == MinaVoiceStatus.aiSpeaking) {
       await abortCurrentSpeechAndListen();
@@ -222,6 +251,34 @@ class MinaBrainController extends ChangeNotifier {
       return;
     }
     await startVoiceConversation();
+  }
+
+  /// Ấn nút cứng phía trước trên thân robot Visbot:
+  /// - Khi đang học / AI đang giảng dài hoặc lạc đề: dừng tiếng ngay lập tức (0ms) + xóa sạch ngữ cảnh cũ + mở mic chủ đề mới (~0.5s).
+  /// - Khi đang ở chế độ chờ (Standby): đánh thức gia sư nghe ngay không cần gọi tên.
+  Future<void> onFrontButtonPressed({String source = 'front_button'}) async {
+    _addLog('BUTTON', 'Ấn nút phía trước ($source) khi status=$_status');
+    if (isInConversation) {
+      await resetTopicAndListen(reason: 'Nút cứng phía trước');
+    } else {
+      await startVoiceConversation();
+    }
+  }
+
+  /// Dừng ngay lập tức câu nói hiện tại VÀ mở phiên WebSocket mới tinh (xóa sạch mạch lạc đề cũ trên server),
+  /// vào thẳng chế độ lắng nghe chủ đề mới (~0.5s, không lặp lại câu chào dài dòng).
+  Future<void> resetTopicAndListen({String reason = 'Đổi chủ đề'}) async {
+    _addLog('TOPIC', '$reason -> Xóa ngữ cảnh cũ, mở chủ đề mới (${activeAssistant.name})');
+    _connectEpoch++;
+    _sendingMicOpus = false;
+    _endSessionAfterTts = false;
+    _endSessionFallback?.cancel();
+    await audioService.stopAndFlushPlayer();
+    await _disconnectSocketOnly();
+    await startVoiceConversation(
+      connectingSubtitle: '🔄 Đã dừng! Đang mở chủ đề mới...',
+      listeningSubtitle: '🔄 Chủ đề mới — ${activeAssistant.name} đang lắng nghe...',
+    );
   }
 
   Future<void> _pauseMediaForConversation() async {
@@ -264,16 +321,19 @@ class MinaBrainController extends ChangeNotifier {
   Future<void> startVoiceConversation({
     String? wakeWordText,
     String? initialPromptText,
+    String? connectingSubtitle,
+    String? listeningSubtitle,
     int retryCount = 0,
   }) async {
     final myEpoch = ++_connectEpoch;
     _connectWatchdog?.cancel();
     _pendingPromptText = initialPromptText;
+    _customListeningSubtitle = listeningSubtitle;
     _sendingMicOpus = false;
     wakeWordService.setEnabled(false);
     _status = MinaVoiceStatus.connectingCloud;
     _emotion = MinaEmotion.thinking;
-    _subtitle = '${activeAssistant.name} đang kết nối...';
+    _subtitle = connectingSubtitle ?? '${activeAssistant.name} đang kết nối...';
     notifyListeners();
 
     unawaited(_pauseMediaForConversation());
@@ -305,15 +365,17 @@ class MinaBrainController extends ChangeNotifier {
       if (myEpoch != _connectEpoch || _status != MinaVoiceStatus.connectingCloud) return;
       _addLog('WS', 'Quá 6s chờ bắt tay (${activeAssistant.name}), tự động kết nối lại...');
       unawaited(_disconnectSocketOnly());
-      if (retryCount < 1) {
-        unawaited(
-          startVoiceConversation(
-            wakeWordText: wakeWordText,
-            initialPromptText: initialPromptText,
-            retryCount: retryCount + 1,
-          ),
-        );
-      } else {
+          if (retryCount < 1) {
+            unawaited(
+              startVoiceConversation(
+                wakeWordText: wakeWordText,
+                initialPromptText: initialPromptText,
+                connectingSubtitle: connectingSubtitle,
+                listeningSubtitle: listeningSubtitle,
+                retryCount: retryCount + 1,
+              ),
+            );
+          } else {
         _enterWakeWordStandby();
       }
     });
@@ -378,6 +440,8 @@ class MinaBrainController extends ChangeNotifier {
           startVoiceConversation(
             wakeWordText: wakeWordText,
             initialPromptText: initialPromptText,
+            connectingSubtitle: connectingSubtitle,
+            listeningSubtitle: listeningSubtitle,
             retryCount: retryCount + 1,
           ),
         );
@@ -439,6 +503,60 @@ class MinaBrainController extends ChangeNotifier {
       return 'mina';
     }
     return null;
+  }
+
+  /// Nhận diện trực tiếp các khẩu lệnh muốn dừng mạch lan man / đổi chủ đề mới ngay lập tức (~0.5s)
+  /// mà không để AI giải thích dài dòng thêm trên phiên hội thoại cũ.
+  bool _isVoiceTopicResetCommand(String rawText) {
+    final clean = rawText
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[.,!?;:"“”…]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (clean.isEmpty) return false;
+
+    const exactStopCommands = {
+      'dừng lại',
+      'dừng lại đi',
+      'dừng lại nhé',
+      'thôi dừng lại',
+      'thôi dừng lại đi',
+      'mina dừng lại',
+      'ngừng lại',
+      'ngừng lại đi',
+      'dừng nói',
+      'thôi đừng nói nữa',
+      'stop',
+      'new topic',
+      'change topic',
+    };
+    if (exactStopCommands.contains(clean)) return true;
+
+    // Câu ngắn (<= 48 ký tự) yêu cầu đổi chủ đề / qua bài khác / báo lạc đề
+    if (clean.length <= 48) {
+      const resetPhrases = [
+        'đổi chủ đề',
+        'chủ đề mới',
+        'chủ đề khác',
+        'sang chủ đề khác',
+        'qua chủ đề khác',
+        'học bài khác',
+        'qua bài khác',
+        'sang bài khác',
+        'đổi bài khác',
+        'bài học mới',
+        'bài học khác',
+        'lạc đề rồi',
+        'đang lạc đề',
+        'bỏ qua bài này',
+        'bỏ qua chủ đề này',
+      ];
+      if (resetPhrases.any((p) => clean.contains(p))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<void> _onSocketData(WebSocket sourceSocket, dynamic data) async {
@@ -524,6 +642,11 @@ class MinaBrainController extends ChangeNotifier {
             unawaited(switchAssistant(fastTarget, startTalking: true));
             return;
           }
+
+          if (_isVoiceTopicResetCommand(text)) {
+            unawaited(resetTopicAndListen(reason: 'Khẩu lệnh "$text"'));
+            return;
+          }
         }
         break;
 
@@ -541,10 +664,13 @@ class MinaBrainController extends ChangeNotifier {
           _connectWatchdog?.cancel();
           _connectWatchdog = null;
           _sendingMicOpus = false;
+          _ttsStartedAt = DateTime.now();
           _status = MinaVoiceStatus.aiSpeaking;
           if (_emotion == MinaEmotion.listening || _emotion == MinaEmotion.thinking) {
             _emotion = MinaEmotion.speaking;
           }
+          // Cho phép cắt lời bằng khẩu lệnh ("Mina ơi", "Đổi chủ đề", "Mina dừng lại") khi gia sư đang nói dài
+          wakeWordService.setEnabled(true);
           notifyListeners();
         } else if (state == 'sentence_start') {
           final text = msg['text']?.toString() ?? '';
@@ -605,9 +731,12 @@ class MinaBrainController extends ChangeNotifier {
     if (_ws == null || _ws!.readyState != WebSocket.open) return;
     _connectWatchdog?.cancel();
     _connectWatchdog = null;
+    wakeWordService.setEnabled(false);
     _status = MinaVoiceStatus.listeningUser;
     _emotion = MinaEmotion.listening;
-    _subtitle = '${activeAssistant.name} đang lắng nghe...';
+    final customSub = _customListeningSubtitle;
+    _customListeningSubtitle = null;
+    _subtitle = customSub ?? '${activeAssistant.name} đang lắng nghe...';
     _sendingMicOpus = true;
     _sendJson({
       'session_id': _sessionId,
@@ -645,7 +774,7 @@ class MinaBrainController extends ChangeNotifier {
     _status = _pairingCode != null ? MinaVoiceStatus.pairingRequired : MinaVoiceStatus.standbyWakeWord;
     _emotion = MinaEmotion.idle;
     if (_pairingCode == null) {
-      _subtitle = 'Gọi "Mina" hoặc chạm màn hình để trò chuyện với ${activeAssistant.name}';
+      _subtitle = 'Gọi "Mina", ấn nút trước hoặc chạm màn hình để gặp ${activeAssistant.name}';
     }
     wakeWordService.setEnabled(true);
     _resumeMediaAfterConversation();

@@ -19,6 +19,9 @@ class MinaMcpServer {
   /// Yêu cầu chuyển sang trợ lý khác. Chạy SAU khi đã trả kết quả cho server.
   final void Function(String assistantId) onSwitchAssistant;
 
+  /// Yêu cầu xóa ngữ cảnh cũ và bắt đầu chủ đề / bài học mới ngay với trợ lý hiện tại.
+  final void Function()? onResetTopic;
+
   /// Báo cho controller biết vừa bật radio/nhạc/video: controller tạm dừng media,
   /// để AI nói xong câu xác nhận, rồi đóng phiên và phát media.
   final Future<void> Function() onMediaStarted;
@@ -36,6 +39,7 @@ class MinaMcpServer {
     required this.audioService,
     required this.onEmotionChanged,
     required this.onSwitchAssistant,
+    this.onResetTopic,
     required this.onMediaStarted,
     required this.deviceMac,
     required this.clientId,
@@ -157,6 +161,16 @@ class MinaMcpServer {
             },
           },
           'required': ['assistant'],
+        },
+      },
+      {
+        'name': 'self.conversation.reset_topic',
+        'description':
+            'Xóa ngữ cảnh hội thoại cũ và mở phiên chủ đề mới tinh ngay với trợ lý/gia sư hiện tại '
+            'khi người dùng nói muốn đổi chủ đề, học bài khác, bỏ qua phần đang nói hoặc báo đang lạc đề.',
+        'inputSchema': {
+          'type': 'object',
+          'properties': {},
         },
       },
       {
@@ -412,6 +426,10 @@ class MinaMcpServer {
         // Chuyển nhanh sau một nhịp ngắn để server kịp nhận phản hồi MCP
         Future<void>.delayed(const Duration(milliseconds: 900), () => onSwitchAssistant(target.id));
         return 'Đang chuyển ngay sang ${target.name}. Hãy nói cực ngắn "Chuyển sang ${target.name} nhé!" rồi dừng.';
+
+      case 'self.conversation.reset_topic':
+        Future<void>.delayed(const Duration(milliseconds: 350), () => onResetTopic?.call());
+        return 'Đang xóa ngữ cảnh cũ để chuyển sang chủ đề mới ngay.';
 
       case 'self.camera.take_photo':
         return _takePhotoAndExplain(args['question']?.toString() ?? 'Trong ảnh có gì?');

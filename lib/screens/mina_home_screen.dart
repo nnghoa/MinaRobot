@@ -27,6 +27,14 @@ class _MinaHomeScreenState extends State<MinaHomeScreen> {
   void initState() {
     super.initState();
     _brain = MinaBrainController();
+    MinaPlatform.setFrontButtonHandler((source, isBackKey) async {
+      if (!mounted) return;
+      if (isBackKey && Navigator.of(context).canPop()) {
+        await Navigator.of(context).maybePop();
+        return;
+      }
+      await _brain.onFrontButtonPressed(source: source);
+    });
     _bootMina();
     _mediaPoll = Timer.periodic(const Duration(seconds: 2), (_) => _refreshMedia());
   }
@@ -116,6 +124,15 @@ class _MinaHomeScreenState extends State<MinaHomeScreen> {
                           ),
                         ),
                       const Spacer(),
+                      if (_brain.isInConversation) ...[
+                        _chip(
+                          icon: Icons.autorenew_rounded,
+                          color: const Color(0xFF38BDF8),
+                          label: 'Chủ đề mới',
+                          onTap: () => _brain.resetTopicAndListen(reason: 'Nút Chủ đề mới trên màn hình'),
+                        ),
+                        const SizedBox(width: 4),
+                      ],
                       IconButton(
                         visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.apps_rounded, color: Colors.white70, size: 26),

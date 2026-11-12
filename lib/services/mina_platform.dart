@@ -39,16 +39,42 @@ class RadioCatalog {
 /// chụp ảnh camera, mở cài đặt hệ thống.
 class MinaPlatform {
   static const MethodChannel _ch = MethodChannel('com.mtc.mina_robot/platform');
+  static bool _handlerInstalled = false;
+  static Future<void> Function(String? say, String? assistant, bool resetTopic)? _broadcastHandler;
+  static Future<void> Function(String source, bool isBackKey)? _frontButtonHandler;
 
-  static void setBroadcastCommandHandler(
-    Future<void> Function(String? say, String? assistant) handler,
-  ) {
+  static void _ensureHandlerInstalled() {
+    if (_handlerInstalled) return;
+    _handlerInstalled = true;
     _ch.setMethodCallHandler((call) async {
+      final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? const {};
       if (call.method == 'onBroadcastCommand') {
-        final args = (call.arguments as Map?)?.cast<String, dynamic>() ?? const {};
-        await handler(args['say']?.toString(), args['assistant']?.toString());
+        await _broadcastHandler?.call(
+          args['say']?.toString(),
+          args['assistant']?.toString(),
+          args['resetTopic'] == true,
+        );
+      } else if (call.method == 'onHardwareFrontButton') {
+        await _frontButtonHandler?.call(
+          args['source']?.toString() ?? 'front_button',
+          args['isBackKey'] == true,
+        );
       }
     });
+  }
+
+  static void setBroadcastCommandHandler(
+    Future<void> Function(String? say, String? assistant, bool resetTopic) handler,
+  ) {
+    _broadcastHandler = handler;
+    _ensureHandlerInstalled();
+  }
+
+  static void setFrontButtonHandler(
+    Future<void> Function(String source, bool isBackKey) handler,
+  ) {
+    _frontButtonHandler = handler;
+    _ensureHandlerInstalled();
   }
 
   // ---------- Media (radio / nhạc qua URL) ----------

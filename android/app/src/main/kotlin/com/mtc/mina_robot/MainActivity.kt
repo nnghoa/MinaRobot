@@ -21,6 +21,8 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -69,6 +71,7 @@ class MainActivity : FlutterActivity() {
             val btConnectAddr = intent.getStringExtra("btConnect")
             val sayText = intent.getStringExtra("say")
             val assistantId = intent.getStringExtra("assistant")
+            val resetTopic = intent.getBooleanExtra("resetTopic", false)
             if (!moveDir.isNullOrEmpty()) {
                 android.util.Log.i("VisbotMotor", "Broadcast move($moveDir) -> " + VisbotMotorController.move(moveDir, dur))
             }
@@ -85,11 +88,11 @@ class MainActivity : FlutterActivity() {
                     android.util.Log.i("RobonovaBT", "Broadcast btByte($btByte) -> ok=$ok, $msg")
                 }
             }
-            if (!sayText.isNullOrEmpty() || !assistantId.isNullOrEmpty()) {
+            if (!sayText.isNullOrEmpty() || !assistantId.isNullOrEmpty() || resetTopic) {
                 mainHandler.post {
                     platformChannel?.invokeMethod(
                         "onBroadcastCommand",
-                        mapOf("say" to sayText, "assistant" to assistantId)
+                        mapOf("say" to sayText, "assistant" to assistantId, "resetTopic" to resetTopic)
                     )
                 }
             }
@@ -99,9 +102,12 @@ class MainActivity : FlutterActivity() {
     // Thu âm 16kHz Mono PCM 16-bit (chuẩn chung cho cả Sherpa-ONNX và XiaoZhi Opus)
     private val isRecording = AtomicBoolean(false)
     private var audioRecord: AudioRecord? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
     private var recordThread: Thread? = null
     private var micEventSink: EventChannel.EventSink? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var lastFrontButtonMs: Long = 0L
 
     // Phát âm thanh PCM thời gian thực từ XiaoZhi (16kHz hoặc 24kHz Mono 16-bit)
     private var audioTrack: AudioTrack? = null
@@ -145,11 +151,82 @@ class MainActivity : FlutterActivity() {
         } catch (_: Throwable) {
         }
 
-        // Khởi tạo bộ điều khiển động cơ bánh xe & servo cổ UBTECH Visbot
+        // Khởi tạo bộ điều khiển động cơ bánh xe, servo cổ & nút cảm biến UBTECH Visbot
+        VisbotMotorController.onFrontSensorPressed = { sensorId ->
+            emitFrontButtonEvent("sensor:$sensorId", isBackKey = false)
+        }
         VisbotMotorController.init(this)
         try {
             registerReceiver(robotCmdReceiver, IntentFilter("com.mtc.mina_visbot.ROBOT_CMD"))
         } catch (_: Throwable) {
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val act = intent.action ?: ""
+        if (act == Intent.ACTION_VOICE_COMMAND || act == Intent.ACTION_ASSIST) {
+            emitFrontButtonEvent("intent:$act", isBackKey = false)
+        }
+    }
+
+    /**
+     * Bắt nút cứng phía trước trên thân robot UBTECH Visbot:
+     * - mtk-irqkey (scanCode = 182 -> KEYCODE_BACK)
+     * - mtk-pmic-keys (scanCode = 582 -> KEYCODE_VOICE_ASSIST / ASSIST)
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val kc = event.keyCode
+        val sc = event.scanCode
+        if (kc == KeyEvent.KEYCODE_VOLUME_UP ||
+            kc == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            kc == KeyEvent.KEYCODE_POWER
+        ) {
+            return super.dispatchKeyEvent(event)
+        }
+
+        val isFrontPhysicalKey =
+            sc == 182 ||
+                sc == 582 ||
+                kc == KeyEvent.KEYCODE_BACK ||
+                kc == KeyEvent.KEYCODE_VOICE_ASSIST ||
+                kc == KeyEvent.KEYCODE_ASSIST ||
+                kc == KeyEvent.KEYCODE_SEARCH ||
+                kc == KeyEvent.KEYCODE_HEADSETHOOK
+
+        if (isFrontPhysicalKey) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                return true
+            }
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
+                val src = when {
+                    sc == 182 -> "front_irqkey_182"
+                    sc == 582 -> "front_voice_582"
+                    else -> "key_$kc"
+                }
+                emitFrontButtonEvent(src, isBackKey = (kc == KeyEvent.KEYCODE_BACK && sc != 582))
+                return true
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun emitFrontButtonEvent(source: String, isBackKey: Boolean) {
+        val now = System.currentTimeMillis()
+        if (now - lastFrontButtonMs < 350L) return
+        lastFrontButtonMs = now
+        mainHandler.post {
+            if (localBlackoutView != null || systemBlackoutView != null) {
+                exitScreenBlackout()
+                return@post
+            }
+            android.util.Log.i("MinaButton", "Hardware front button: source=$source, isBackKey=$isBackKey")
+            platformChannel?.invokeMethod(
+                "onHardwareFrontButton",
+                mapOf("source" to source, "isBackKey" to isBackKey)
+            )
         }
     }
 
@@ -943,6 +1020,28 @@ class MainActivity : FlutterActivity() {
             return false
         }
 
+        // Bật khử tiếng vọng (AEC) & lọc ồn phần cứng để bắt khẩu lệnh ngắt lời ngay cả khi loa đang nói
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        android.util.Log.i(
+            "MinaAudio",
+            "Mic started (session=${record.audioSessionId}, aec=${echoCanceler?.enabled == true}, ns=${noiseSuppressor?.enabled == true})"
+        )
+
         audioRecord = record
         isRecording.set(true)
         val pendingMicPosts = AtomicBoolean(false)
@@ -980,6 +1079,16 @@ class MainActivity : FlutterActivity() {
         } catch (_: Throwable) {
         }
         recordThread = null
+        try {
+            echoCanceler?.release()
+        } catch (_: Throwable) {
+        }
+        echoCanceler = null
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Throwable) {
+        }
+        noiseSuppressor = null
         try {
             audioRecord?.stop()
         } catch (_: Throwable) {

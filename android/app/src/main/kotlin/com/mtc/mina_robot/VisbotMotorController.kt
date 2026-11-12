@@ -8,6 +8,10 @@ import com.ubtrobot.Robot
 import com.ubtrobot.async.Cancelable
 import com.ubtrobot.locomotion.LocomotionManager
 import com.ubtrobot.locomotion.LocomotionOption
+import com.ubtrobot.sensor.SensorDevice
+import com.ubtrobot.sensor.SensorEvent
+import com.ubtrobot.sensor.SensorListener
+import com.ubtrobot.sensor.SensorManager
 import com.ubtrobot.servo.RotationOption
 import com.ubtrobot.servo.ServoManager
 
@@ -27,8 +31,14 @@ object VisbotMotorController {
 
     private var locomotionManager: LocomotionManager? = null
     private var servoManager: ServoManager? = null
+    private var sensorManager: SensorManager? = null
+    private var sensorsRegistered: Boolean = false
+    private var lastSensorPressMs: Long = 0L
     private var currentLocomotionPromise: Cancelable? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Gọi khi nút bấm / cảm ứng chạm vật lý trên thân Visbot được kích hoạt */
+    var onFrontSensorPressed: ((String) -> Unit)? = null
 
     fun init(context: Context) {
         if (isInitialized && locomotionManager != null) return
@@ -38,13 +48,54 @@ object VisbotMotorController {
             val global = Robot.globalContext()
             locomotionManager = global.getSystemService("locomotion") as? LocomotionManager
             servoManager = global.getSystemService("servo") as? ServoManager
+            sensorManager = global.getSystemService("sensor") as? SensorManager
+            registerPhysicalButtonSensors()
             isInitialized = (locomotionManager != null || servoManager != null)
-            lastStatusMessage = "UBTECH SDK OK (loco=${locomotionManager != null}, servo=${servoManager != null})"
+            lastStatusMessage = "UBTECH SDK OK (loco=${locomotionManager != null}, servo=${servoManager != null}, sensor=${sensorManager != null})"
             Log.i(TAG, lastStatusMessage)
         } catch (e: Throwable) {
             isInitialized = false
             lastStatusMessage = "Lỗi khởi tạo UBTECH SDK: ${e.message}"
             Log.e(TAG, lastStatusMessage, e)
+        }
+    }
+
+    private fun registerPhysicalButtonSensors() {
+        if (sensorsRegistered) return
+        val sm = sensorManager ?: return
+        try {
+            val devices = sm.deviceList ?: emptyList()
+            for (dev in devices) {
+                val id = dev.id ?: continue
+                val meta = "${dev.id} ${dev.name ?: ""} ${dev.type ?: ""} ${dev.description ?: ""}".lowercase()
+                Log.i(TAG, "UBTECH Sensor device: id=$id, type=${dev.type}, name=${dev.name}, desc=${dev.description}")
+                val isButtonOrTouch = (meta.contains("button") || meta.contains("touch") || meta.contains("key") || meta.contains("tap") || meta.contains("pat")) &&
+                    !meta.contains("pir") && !meta.contains("ir") && !meta.contains("infra") &&
+                    !meta.contains("cliff") && !meta.contains("sonar") && !meta.contains("ultra") &&
+                    !meta.contains("battery") && !meta.contains("drop")
+                if (isButtonOrTouch) {
+                    try {
+                        sm.enable(id)
+                    } catch (_: Throwable) {
+                    }
+                    sm.registerListener(id, object : SensorListener {
+                        override fun onSensorChanged(device: SensorDevice?, event: SensorEvent?) {
+                            val v = event?.values?.firstOrNull() ?: 0f
+                            if (v >= 1.0f) {
+                                val now = System.currentTimeMillis()
+                                if (now - lastSensorPressMs >= 600L) {
+                                    lastSensorPressMs = now
+                                    Log.i(TAG, "Physical button/touch sensor pressed: id=$id, v=$v")
+                                    onFrontSensorPressed?.invoke(id)
+                                }
+                            }
+                        }
+                    })
+                }
+            }
+            sensorsRegistered = true
+        } catch (e: Throwable) {
+            Log.w(TAG, "Không đọc được danh sách cảm biến Visbot: ${e.message}")
         }
     }
 
