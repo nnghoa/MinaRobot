@@ -52,6 +52,7 @@ class MinaBrainController extends ChangeNotifier {
   bool _mediaPausedByMina = false;
   bool _endSessionAfterTts = false;
   int _connectEpoch = 0;
+  int _bannedRotateCount = 0;
   Timer? _connectWatchdog;
   Timer? _endSessionFallback;
   StreamSubscription<Uint8List>? _micSub;
@@ -133,6 +134,7 @@ class MinaBrainController extends ChangeNotifier {
     final target = AssistantCatalog.byId(id);
     _addLog('ASSISTANT', 'Chuyển nhanh sang ${target.name}');
     _connectEpoch++;
+    _bannedRotateCount = 0;
     _sendingMicOpus = false;
     unawaited(audioService.stopAndFlushPlayer());
     await _disconnectSocketOnly();
@@ -675,17 +677,34 @@ class MinaBrainController extends ChangeNotifier {
         } else if (state == 'sentence_start') {
           final text = msg['text']?.toString() ?? '';
           if (text.isNotEmpty) {
-            // Nếu kênh định danh hiện tại bị máy chủ khóa ("违反用户协议" / "禁止使用"),
-            // lập tức ngắt âm thanh, tự động xoay sang kênh tiếng Việt tiếp theo và kết nối lại!
-            if (text.contains('禁止使用') || text.contains('违反用户协议')) {
-              _addLog('OTA', 'Kênh $_deviceMac bị khóa, tự động chuyển sang kênh tiếng Việt tiếp theo...');
+            // Nếu kênh định danh hiện tại bị máy chủ khóa ("违反用户协议" / "禁止使用") hoặc chưa có firmware info,
+            // lập tức ngắt âm thanh, tự động xoay sang kênh tiếng Việt tiếp theo (tối đa 5 lần để tránh lặp vô tận)!
+            if (text.contains('禁止使用') ||
+                text.contains('违反用户协议') ||
+                text.contains('No firmware version info')) {
+              _bannedRotateCount++;
               await audioService.stopAndFlushPlayer();
               await _disconnectSocketOnly();
-              await otaService.rotateBuiltinDevice(_activeAssistantId);
-              unawaited(startVoiceConversation());
+              if (_bannedRotateCount <= 5) {
+                _addLog('OTA', 'Kênh $_deviceMac bị khóa ($_bannedRotateCount/5), tự động chuyển sang kênh tiếp theo...');
+                await otaService.rotateBuiltinDevice(_activeAssistantId);
+                unawaited(startVoiceConversation());
+              } else {
+                _addLog('OTA', 'Đã thử 5 kênh liên tiếp đều bận/khóa. Tạm dừng tự kết nối lại.');
+                _bannedRotateCount = 0;
+                _status = MinaVoiceStatus.error;
+                _emotion = MinaEmotion.sad;
+                _subtitle = 'Các kênh tự động đang bận. Vui lòng thử lại hoặc bật Ghép nối riêng trong Cài đặt.';
+                wakeWordService.setEnabled(true);
+                notifyListeners();
+              }
               return;
             }
-            final cleanSubtitle = text.replaceAll(RegExp(r'lily', caseSensitive: false), activeAssistant.name);
+            _bannedRotateCount = 0;
+            final cleanSubtitle = text.replaceAll(
+              RegExp(r'linh\s*nhi(\s*dễ\s*thương|\s*mỏ\s*hỗn)?|lily', caseSensitive: false),
+              activeAssistant.name,
+            );
             _subtitle = cleanSubtitle;
             _addLog(activeAssistant.name.toUpperCase(), cleanSubtitle);
             notifyListeners();
