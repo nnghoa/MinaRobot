@@ -90,7 +90,7 @@ class _MinaSettingsScreenState extends State<MinaSettingsScreen> {
                   title: const Text('Dùng tài khoản tích hợp sẵn (Không cần đăng ký)',
                       style: TextStyle(color: Colors.white, fontSize: 12)),
                   subtitle: const Text(
-                    'Tự động kết nối cho cả 5 trợ lý mà không cần tạo tài khoản xiaozhi.me',
+                    'Tự động kết nối cho đầy đủ 18 trợ lý & gia sư AI mà không cần tạo tài khoản xiaozhi.me',
                     style: label,
                   ),
                   onChanged: (useBuiltin) async {

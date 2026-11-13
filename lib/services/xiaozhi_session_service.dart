@@ -53,6 +53,8 @@ class MinaBrainController extends ChangeNotifier {
   bool _endSessionAfterTts = false;
   int _connectEpoch = 0;
   int _bannedRotateCount = 0;
+  bool _turnActivatedForSession = false;
+  Timer? _mcpReadyFallbackTimer;
   Timer? _connectWatchdog;
   Timer? _endSessionFallback;
   StreamSubscription<Uint8List>? _micSub;
@@ -145,11 +147,28 @@ class MinaBrainController extends ChangeNotifier {
     );
 
     if (startTalking) {
-      // Dùng từ khóa ngắn "Xin chào" chuẩn giao thức detect để máy chủ phát lời chào ngay (~0.4s vào TTS)
-      await startVoiceConversation(initialPromptText: 'Xin chào');
+      // Gửi câu chào kèm tên nhân vật sau khi MCP tools/list đã nạp xong để AI luôn xưng đúng tên (Mina / Gia sư)
+      await startVoiceConversation(initialPromptText: _initialGreetingPromptFor(target));
     } else {
       await refreshOtaStatus();
       _enterWakeWordStandby();
+    }
+  }
+
+  String _initialGreetingPromptFor(AssistantProfile target) {
+    switch (target.id) {
+      case 'mina':
+        return 'Chào Mina, hãy tự giới thiệu tên bạn là Mina thật ngắn gọn nhé';
+      case 'ke_chuyen':
+        return 'Chào chị Mina kể chuyện, hãy chào bé thật ngắn gọn nhé';
+      case 'gia_su_tieng_trung':
+        return 'Chào Cô Lâm gia sư Tiếng Trung, hãy chào học sinh thật ngắn gọn nhé';
+      case 'gia_su_tieng_nhat':
+        return 'Chào Cô Yumi gia sư Tiếng Nhật, hãy chào học sinh thật ngắn gọn nhé';
+      case 'gia_su_tieng_han':
+        return 'Chào Cô Ji-yeon gia sư Tiếng Hàn, hãy chào học sinh thật ngắn gọn nhé';
+      default:
+        return 'Xin chào ${target.name}';
     }
   }
 
@@ -485,23 +504,77 @@ class MinaBrainController extends ChangeNotifier {
     final hasSwitchIntent = switchVerbs.any((v) => s.contains(v));
     if (!hasSwitchIntent) return null;
 
-    if (s.contains('tiếng anh') || s.contains('anh văn') || s.contains('english')) {
+    if (s.contains('tiếng anh') || s.contains('anh văn') || s.contains('english') || s.contains('thầy minh')) {
       return 'gia_su_tieng_anh';
     }
-    if (s.contains('gia sư toán') || s.contains('thầy toán') || s.contains('cô toán') || s.contains('môn toán')) {
+    if (s.contains('tiếng trung') || s.contains('tiếng hoa') || s.contains('chữ hán') || s.contains('hsk') || s.contains('cô lâm')) {
+      return 'gia_su_tieng_trung';
+    }
+    if (s.contains('tiếng nhật') || s.contains('nhật bản') || s.contains('jlpt') || s.contains('cô yumi')) {
+      return 'gia_su_tieng_nhat';
+    }
+    if (s.contains('tiếng hàn') || s.contains('hàn quốc') || s.contains('topik') || s.contains('ji-yeon')) {
+      return 'gia_su_tieng_han';
+    }
+    if (s.contains('hình học') || s.contains('cô ngọc') || s.contains('toán hình')) {
+      return 'gia_su_hinh_hoc';
+    }
+    if (s.contains('gia sư toán') ||
+        s.contains('thầy toán') ||
+        s.contains('cô toán') ||
+        s.contains('môn toán') ||
+        s.contains('học toán') ||
+        s.contains('đại số') ||
+        s.contains('thầy thắng')) {
       return 'gia_su_toan';
     }
     if (s.contains('gia sư văn') ||
         s.contains('ngữ văn') ||
         s.contains('tiếng việt') ||
         s.contains('cô văn') ||
-        s.contains('môn văn')) {
+        s.contains('môn văn') ||
+        s.contains('học văn') ||
+        s.contains('cô xuân') ||
+        s.contains('làm văn')) {
       return 'gia_su_van';
+    }
+    if (s.contains('vật lý') || s.contains('môn lý') || s.contains('học lý') || s.contains('thầy lý') || s.contains('thầy hùng')) {
+      return 'gia_su_vat_ly';
+    }
+    if (s.contains('hóa học') || s.contains('môn hóa') || s.contains('học hóa') || s.contains('cô hóa') || s.contains('cô hà')) {
+      return 'gia_su_hoa_hoc';
+    }
+    if (s.contains('sinh học') || s.contains('môn sinh') || s.contains('thầy sinh') || s.contains('thầy dũng')) {
+      return 'gia_su_sinh_hoc';
+    }
+    if (s.contains('lịch sử') ||
+        s.contains('địa lý') ||
+        s.contains('sử địa') ||
+        s.contains('môn sử') ||
+        s.contains('môn địa') ||
+        s.contains('du lịch') ||
+        s.contains('anh hiển')) {
+      return 'gia_su_su_dia';
+    }
+    if (s.contains('tin học') || s.contains('lập trình') || s.contains('máy tính') || s.contains('học code') || s.contains('vũ tú')) {
+      return 'gia_su_tin_hoc';
+    }
+    if (s.contains('bác sĩ') || s.contains('sức khỏe') || s.contains('dinh dưỡng') || s.contains('y khoa')) {
+      return 'bac_si_tuan';
+    }
+    if (s.contains('tâm lý') || s.contains('cảm xúc') || s.contains('minh tâm')) {
+      return 'chuyen_gia_tam_ly';
+    }
+    if (s.contains('bạn đồng hành') || s.contains('nam minh') || s.contains('giao thông')) {
+      return 'ban_dong_hanh';
+    }
+    if (s.contains('bạn tâm sự') || s.contains('linh đan') || s.contains('tâm sự')) {
+      return 'ban_tam_su';
     }
     if (s.contains('kể chuyện') || s.contains('đọc truyện') || s.contains('cổ tích')) {
       return 'ke_chuyen';
     }
-    if (s.contains('mina') || s.contains('mi na')) {
+    if (s.contains('mina') || s.contains('mi na') || s.contains('trợ lý chính')) {
       return 'mina';
     }
     return null;
@@ -588,6 +661,8 @@ class MinaBrainController extends ChangeNotifier {
       case 'hello':
         _connectWatchdog?.cancel();
         _connectWatchdog = null;
+        _mcpReadyFallbackTimer?.cancel();
+        _turnActivatedForSession = false;
         _sessionId = msg['session_id']?.toString() ?? '';
         final audioParams = (msg['audio_params'] as Map?)?.cast<String, dynamic>();
         final serverSampleRate = (audioParams?['sample_rate'] as num?)?.toInt() ?? 24000;
@@ -596,29 +671,11 @@ class MinaBrainController extends ChangeNotifier {
         if (!identical(sourceSocket, _ws)) return;
 
         _addLog('WS', 'Bắt tay xong (${activeAssistant.name})! session=$_sessionId');
-        final prompt = _pendingPromptText;
-        _pendingPromptText = null;
-        if (prompt != null && prompt.isNotEmpty) {
-          _ignoreSttEchoText = prompt;
-          _subtitle = '${activeAssistant.name} đang chào bạn...';
-          notifyListeners();
-          _sendJson({
-            'session_id': _sessionId,
-            'type': 'listen',
-            'state': 'detect',
-            'text': prompt,
-          });
-          // Nếu Wi-Fi đổi AP làm rớt gói tin quá 4s chưa phát tiếng thì tự mở mic lắng nghe, không bao giờ kẹt
-          _connectWatchdog = Timer(const Duration(seconds: 4), () {
-            if (identical(sourceSocket, _ws) && _status == MinaVoiceStatus.connectingCloud) {
-              _ignoreSttEchoText = null;
-              _startListeningTurn();
-            }
-          });
-        } else {
-          _ignoreSttEchoText = null;
-          _startListeningTurn();
-        }
+        // Đợi máy chủ gọi MCP tools/list (~120ms sau hello) để nạp xong nhân vật Mina/Gia sư trước khi phát câu chào
+        // hoặc mở mic lắng nghe. Nếu quá 450ms máy chủ không gọi tools/list thì vẫn tự kích hoạt bình thường.
+        _mcpReadyFallbackTimer = Timer(const Duration(milliseconds: 450), () {
+          _activateTurnAfterMcpReady(sourceSocket);
+        });
         break;
 
       case 'stt':
@@ -728,6 +785,7 @@ class MinaBrainController extends ChangeNotifier {
       case 'mcp':
         final payload = (msg['payload'] as Map?)?.cast<String, dynamic>();
         if (payload != null) {
+          final method = payload['method']?.toString() ?? '';
           final rpcResponse = await mcpServer.handleJsonRpc(payload);
           if (!identical(sourceSocket, _ws)) return;
           if (rpcResponse != null) {
@@ -737,12 +795,48 @@ class MinaBrainController extends ChangeNotifier {
               'payload': rpcResponse,
             });
           }
+          if (method == 'tools/list') {
+            _mcpReadyFallbackTimer?.cancel();
+            _mcpReadyFallbackTimer = null;
+            _activateTurnAfterMcpReady(sourceSocket);
+          }
         }
         break;
 
       case 'goodbye':
         await closeVoiceSession();
         break;
+    }
+  }
+
+  void _activateTurnAfterMcpReady(WebSocket sourceSocket) {
+    if (!identical(sourceSocket, _ws) || _turnActivatedForSession) return;
+    _turnActivatedForSession = true;
+    _mcpReadyFallbackTimer?.cancel();
+    _mcpReadyFallbackTimer = null;
+
+    final prompt = _pendingPromptText;
+    _pendingPromptText = null;
+    if (prompt != null && prompt.isNotEmpty) {
+      _ignoreSttEchoText = prompt;
+      _subtitle = '${activeAssistant.name} đang chào bạn...';
+      notifyListeners();
+      _sendJson({
+        'session_id': _sessionId,
+        'type': 'listen',
+        'state': 'detect',
+        'text': prompt,
+      });
+      // Nếu Wi-Fi đổi AP làm rớt gói tin quá 4s chưa phát tiếng thì tự mở mic lắng nghe, không bao giờ kẹt
+      _connectWatchdog = Timer(const Duration(seconds: 4), () {
+        if (identical(sourceSocket, _ws) && _status == MinaVoiceStatus.connectingCloud) {
+          _ignoreSttEchoText = null;
+          _startListeningTurn();
+        }
+      });
+    } else {
+      _ignoreSttEchoText = null;
+      _startListeningTurn();
     }
   }
 
@@ -803,6 +897,9 @@ class MinaBrainController extends ChangeNotifier {
   Future<void> _disconnectSocketOnly() async {
     _connectWatchdog?.cancel();
     _connectWatchdog = null;
+    _mcpReadyFallbackTimer?.cancel();
+    _mcpReadyFallbackTimer = null;
+    _turnActivatedForSession = false;
     final old = _ws;
     _ws = null;
     _sessionId = '';
