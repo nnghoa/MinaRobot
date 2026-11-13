@@ -693,7 +693,7 @@ class MinaBrainController extends ChangeNotifier {
                 _addLog('OTA', 'Đã thử 5 kênh liên tiếp đều bận/khóa. Tạm dừng tự kết nối lại.');
                 _bannedRotateCount = 0;
                 _status = MinaVoiceStatus.error;
-                _emotion = MinaEmotion.sad;
+                _emotion = MinaEmotion.idle;
                 _subtitle = 'Các kênh tự động đang bận. Vui lòng thử lại hoặc bật Ghép nối riêng trong Cài đặt.';
                 wakeWordService.setEnabled(true);
                 notifyListeners();
