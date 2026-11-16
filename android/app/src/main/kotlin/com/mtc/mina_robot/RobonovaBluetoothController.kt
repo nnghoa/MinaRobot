@@ -3,43 +3,97 @@ package com.mtc.mina_robot
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothSocket
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Bộ điều khiển Robot hình người Robonova-II (mạch MR-C3024FX) qua Bluetooth SPP (HC-06 / HC-05).
+ * Bộ điều khiển Robot hình người (BJROBOT SUPER-M V6.1 / MR-C3024FX) hỗ trợ kép:
+ *  1. BLE 4.0/5.0 UART ([LE] HC-06, BT05, HM-10, DX-BT24, JDY-23, JDY-16, HC-08, HC-42, NUS...)
+ *  2. Bluetooth Classic SPP 2.0 (HC-06 / HC-05 truyền thống RFCOMM UUID 00001101-...)
  *
- * - Chuẩn giao tiếp: RFCOMM SPP UUID 00001101-0000-1000-8000-00805F9B34FB (9600 baud ở phía HC-06 -> ERX).
- * - Mỗi hành động K1..K68 là 1 byte ASCII (DEC 40..108).
- * - Hỗ trợ tự động tìm và kết nối lại thiết bị HC-06 đã ghép đôi, hoặc gửi chuỗi liên hoàn quyền / vũ đạo.
+ * Tự động phát hiện loại module ([LE] / Dual / Classic), dùng lại kết nối BLE sẵn có của hệ thống Android
+ * nếu người dùng đã kết nối trong Cài đặt Bluetooth, hoặc tự quét BLE + mở kênh UART truyền 1 byte ASCII
+ * (DEC 40..111) xuống chân ERX 9600 bps trên mạch SUPER-M V6.1.
  */
 @SuppressLint("MissingPermission")
+@Suppress("DEPRECATION")
 object RobonovaBluetoothController {
     private const val TAG = "RobonovaBT"
     private const val PREFS_NAME = "mina_robonova_bt"
     private const val KEY_LAST_ADDR = "last_bt_address"
     private const val KEY_LAST_NAME = "last_bt_name"
+    private const val KEY_BLE_TX_UUID = "preferred_ble_tx_uuid"
 
     private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+    private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    // Thứ tự ưu tiên các Characteristic TX phổ biến trên module BLE UART (HM-10, BT05, DX-BT24, JDY, NUS, ISSC)
+    private val PREFERRED_BLE_TX_CHAR_UUIDS: List<String> = listOf(
+        "0000ffe1-0000-1000-8000-00805f9b34fb",
+        "0000ffe2-0000-1000-8000-00805f9b34fb",
+        "0000ffe9-0000-1000-8000-00805f9b34fb",
+        "0000ffe3-0000-1000-8000-00805f9b34fb",
+        "0000fff2-0000-1000-8000-00805f9b34fb",
+        "0000fff1-0000-1000-8000-00805f9b34fb",
+        "0000fff6-0000-1000-8000-00805f9b34fb",
+        "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+        "49535343-8841-43f4-a8d4-ecbe34729bb3",
+        "49535343-1e4d-4bd9-ba61-23c647249616",
+    )
+
+    private val SYSTEM_GATT_SERVICES: Set<String> = setOf(
+        "00001800-0000-1000-8000-00805f9b34fb",
+        "00001801-0000-1000-8000-00805f9b34fb",
+        "0000180a-0000-1000-8000-00805f9b34fb",
+    )
+
     private val worker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // --- Kênh Classic RFCOMM ---
     @Volatile
     private var socket: BluetoothSocket? = null
 
     @Volatile
     private var outputStream: OutputStream? = null
+
+    // --- Kênh BLE GATT ---
+    @Volatile
+    private var bluetoothGatt: BluetoothGatt? = null
+
+    @Volatile
+    private var bleTxCharacteristic: BluetoothGattCharacteristic? = null
+
+    private val bleConnected = AtomicBoolean(false)
+
+    @Volatile
+    private var activeWriteLatch: CountDownLatch? = null
+
+    private val lastWriteStatus = AtomicInteger(BluetoothGatt.GATT_SUCCESS)
 
     @Volatile
     var connectedName: String = ""
@@ -54,11 +108,14 @@ object RobonovaBluetoothController {
         private set
 
     private val discoveredDevices = ConcurrentHashMap<String, String>()
+    private val cachedDeviceObjects = ConcurrentHashMap<String, BluetoothDevice>()
     private val sequenceRunning = AtomicBoolean(false)
 
     val isConnected: Boolean
         get() = try {
-            socket?.isConnected == true && outputStream != null
+            val rfcommOk = socket?.isConnected == true && outputStream != null
+            val bleOk = bleConnected.get() && bluetoothGatt != null && bleTxCharacteristic != null
+            rfcommOk || bleOk
         } catch (_: Throwable) {
             false
         }
@@ -91,27 +148,55 @@ object RobonovaBluetoothController {
             if (!adapter.isEnabled) {
                 adapter.enable()
             }
+
+            // 1. Các thiết bị BLE đang kết nối ở tầng hệ thống Android (Cài đặt Bluetooth)
+            val btMgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val sysGattConnected = try {
+                btMgr?.getConnectedDevices(BluetoothProfile.GATT) ?: emptyList()
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            for (dev in sysGattConnected) {
+                val addr = dev.address ?: continue
+                val name = dev.name ?: discoveredDevices[addr] ?: "BLE-$addr"
+                cachedDeviceObjects[addr] = dev
+                if (seen.add(addr)) {
+                    result.add(
+                        mapOf(
+                            "name" to name,
+                            "address" to addr,
+                            "paired" to true,
+                            "connected" to (isConnected && addr.equals(connectedAddress, ignoreCase = true)),
+                        )
+                    )
+                }
+            }
+
+            // 2. Các thiết bị đã ghép đôi (Bonded)
             val bonded = adapter.bondedDevices ?: emptySet()
             val sortedBonded = bonded.sortedByDescending { dev ->
                 scoreDeviceName(dev.name ?: "")
             }
             for (dev in sortedBonded) {
                 val addr = dev.address ?: continue
-                val name = dev.name ?: "Thiết bị BT"
-                seen.add(addr)
-                result.add(
-                    mapOf(
-                        "name" to name,
-                        "address" to addr,
-                        "paired" to true,
-                        "connected" to (isConnected && addr.equals(connectedAddress, ignoreCase = true)),
+                val name = dev.name ?: discoveredDevices[addr] ?: "Thiết bị BT"
+                cachedDeviceObjects[addr] = dev
+                if (seen.add(addr)) {
+                    result.add(
+                        mapOf(
+                            "name" to name,
+                            "address" to addr,
+                            "paired" to true,
+                            "connected" to (isConnected && addr.equals(connectedAddress, ignoreCase = true)),
+                        )
                     )
-                )
+                }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "getKnownDevices error: ${t.message}")
         }
 
+        // 3. Các thiết bị vừa quét thấy (BLE + Classic)
         for ((addr, name) in discoveredDevices) {
             if (seen.add(addr)) {
                 result.add(
@@ -131,14 +216,15 @@ object RobonovaBluetoothController {
         val u = name.uppercase()
         return when {
             u.contains("HC-06") || u.contains("HC06") -> 100
-            u.contains("HC-05") || u.contains("HC05") -> 95
-            u.contains("ROBONOVA") || u.contains("ROBOT") -> 90
-            u.contains("JDY") || u.contains("BT0") || u.contains("SPP") -> 80
+            u.contains("HC-05") || u.contains("HC05") || u.contains("HC-08") || u.contains("HC-42") -> 95
+            u.contains("ROBONOVA") || u.contains("BJROBOT") || u.contains("SUPER-M") || u.contains("ROBOT") -> 92
+            u.contains("BT05") || u.contains("BT04") || u.contains("BT24") || u.contains("HM-10") || u.contains("HMSOFT") -> 88
+            u.contains("JDY") || u.contains("DX-BT") || u.contains("SPP") || u.contains("BLE") -> 82
             else -> 10
         }
     }
 
-    fun scanDevices(context: Context, durationMs: Long = 4500L, onDone: (Map<String, Any>) -> Unit) {
+    fun scanDevices(context: Context, durationMs: Long = 4000L, onDone: (Map<String, Any>) -> Unit) {
         val appCtx = context.applicationContext
         val adapter = BluetoothAdapter.getDefaultAdapter()
         if (adapter == null) {
@@ -156,12 +242,30 @@ object RobonovaBluetoothController {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 if (intent?.action == BluetoothDevice.ACTION_FOUND) {
-                    val dev = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
-                    val addr = dev?.address ?: return
-                    val name = dev.name ?: "BT-$addr"
+                    val dev = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+                    val addr = dev.address ?: return
+                    val name = dev.name ?: discoveredDevices[addr] ?: "BT-$addr"
                     discoveredDevices[addr] = name
-                    Log.i(TAG, "Discovered BT device: $name ($addr)")
+                    cachedDeviceObjects[addr] = dev
+                    Log.i(TAG, "Discovered Classic/Dual BT: $name ($addr, type=${dev.type})")
                 }
+            }
+        }
+
+        val leScanner = try {
+            adapter.bluetoothLeScanner
+        } catch (_: Throwable) {
+            null
+        }
+
+        val leCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                val dev = result?.device ?: return
+                val addr = dev.address ?: return
+                val name = dev.name ?: result.scanRecord?.deviceName ?: discoveredDevices[addr] ?: "BLE-$addr"
+                discoveredDevices[addr] = name
+                cachedDeviceObjects[addr] = dev
+                Log.i(TAG, "Discovered BLE device: $name ($addr, rssi=${result.rssi})")
             }
         }
 
@@ -169,12 +273,26 @@ object RobonovaBluetoothController {
             appCtx.registerReceiver(receiver, IntentFilter(BluetoothDevice.ACTION_FOUND))
             if (adapter.isDiscovering) adapter.cancelDiscovery()
             adapter.startDiscovery()
-            lastStatusMessage = "Đang quét Bluetooth tìm HC-06..."
         } catch (t: Throwable) {
             Log.w(TAG, "startDiscovery error: ${t.message}")
         }
 
+        try {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            leScanner?.startScan(null, settings, leCallback)
+        } catch (t: Throwable) {
+            Log.w(TAG, "BLE startScan error: ${t.message}")
+        }
+
+        lastStatusMessage = "Đang quét Bluetooth (BLE + Classic)..."
+
         mainHandler.postDelayed({
+            try {
+                leScanner?.stopScan(leCallback)
+            } catch (_: Throwable) {
+            }
             try {
                 adapter.cancelDiscovery()
             } catch (_: Throwable) {
@@ -197,6 +315,7 @@ object RobonovaBluetoothController {
         }
     }
 
+    @Synchronized
     private fun connectBlocking(context: Context, targetAddress: String?): Pair<Boolean, String> {
         val adapter = BluetoothAdapter.getDefaultAdapter()
             ?: return Pair(false, "Không có phần cứng Bluetooth trên thiết bị này.")
@@ -213,22 +332,37 @@ object RobonovaBluetoothController {
         }
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        var address = targetAddress?.trim() ?: ""
+        val btMgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val sysGattDevs = try {
+            btMgr?.getConnectedDevices(BluetoothProfile.GATT) ?: emptyList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        for (d in sysGattDevs) {
+            d.address?.let { cachedDeviceObjects[it] = d }
+        }
 
+        val bonded = try {
+            adapter.bondedDevices?.toList() ?: emptyList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        for (d in bonded) {
+            d.address?.let { cachedDeviceObjects[it] = d }
+        }
+
+        var address = targetAddress?.trim() ?: ""
         if (address.isEmpty()) {
-            // 1. Thử tìm trong danh sách đã ghép đôi (ưu tiên HC-06 / HC-05 / ROBONOVA)
-            val bonded = try {
-                adapter.bondedDevices?.toList() ?: emptyList()
-            } catch (_: Throwable) {
-                emptyList()
-            }
-            val preferred = bonded.maxByOrNull { scoreDeviceName(it.name ?: "") }
+            val sysPreferred = sysGattDevs.maxByOrNull { scoreDeviceName(it.name ?: "") }
+            val bondedPreferred = bonded.maxByOrNull { scoreDeviceName(it.name ?: "") }
             val savedAddr = prefs.getString(KEY_LAST_ADDR, "") ?: ""
 
             address = when {
-                preferred != null && scoreDeviceName(preferred.name ?: "") >= 80 -> preferred.address
+                sysPreferred != null && scoreDeviceName(sysPreferred.name ?: "") >= 80 -> sysPreferred.address
+                bondedPreferred != null && scoreDeviceName(bondedPreferred.name ?: "") >= 80 -> bondedPreferred.address
                 savedAddr.isNotEmpty() -> savedAddr
-                preferred != null -> preferred.address
+                sysPreferred != null -> sysPreferred.address
+                bondedPreferred != null -> bondedPreferred.address
                 discoveredDevices.isNotEmpty() -> {
                     discoveredDevices.entries.maxByOrNull { scoreDeviceName(it.value) }?.key ?: ""
                 }
@@ -236,8 +370,17 @@ object RobonovaBluetoothController {
             }
         }
 
+        // Nếu vẫn chưa có địa chỉ, quét nhanh BLE 2.5s để tìm module HC-06 BLE xung quanh
         if (address.isEmpty()) {
-            lastStatusMessage = "Chưa ghép đôi HC-06. Hãy mở Cài đặt Bluetooth để ghép đôi HC-06 (PIN 1234)."
+            val scanned = quickScanForBleTarget(adapter, null, 2500L)
+            if (scanned != null) {
+                address = scanned.address
+                cachedDeviceObjects[address] = scanned
+            }
+        }
+
+        if (address.isEmpty()) {
+            lastStatusMessage = "Chưa tìm thấy HC-06. Hãy bật nguồn robot và bấm Quét."
             return Pair(false, lastStatusMessage)
         }
 
@@ -249,19 +392,63 @@ object RobonovaBluetoothController {
         disconnectBlocking()
 
         val device = try {
-            adapter.getRemoteDevice(address)
+            cachedDeviceObjects[address] ?: adapter.getRemoteDevice(address)
         } catch (t: Throwable) {
             lastStatusMessage = "Địa chỉ Bluetooth không hợp lệ: $address"
             return Pair(false, lastStatusMessage)
         }
 
         val devName = try {
-            device.name ?: discoveredDevices[address] ?: "HC-06"
+            device.name ?: discoveredDevices[address] ?: prefs.getString(KEY_LAST_NAME, null) ?: "HC-06"
         } catch (_: Throwable) {
             "HC-06"
         }
 
-        // Thử lần lượt 3 phương thức tạo RFCOMM socket để tương thích 100% với mọi module HC-06/HC-05 trên Android 8.1
+        val devType = try {
+            device.type
+        } catch (_: Throwable) {
+            BluetoothDevice.DEVICE_TYPE_UNKNOWN
+        }
+        Log.i(TAG, "Connecting to $devName ($address), deviceType=$devType (1=Classic, 2=LE, 3=Dual)")
+
+        // 1. Nếu thiết bị là BLE ([LE] HC-06, deviceType == 2) -> Kết nối thẳng qua BLE GATT!
+        if (devType == BluetoothDevice.DEVICE_TYPE_LE) {
+            val (bleOk, bleMsg) = connectBleWithRetry(context, adapter, device, devName)
+            if (bleOk) {
+                saveLastDevice(prefs, connectedAddress, connectedName)
+                return Pair(true, bleMsg)
+            }
+            return Pair(false, bleMsg)
+        }
+
+        // 2. Nếu là Dual-Mode hoặc Classic/Unknown -> Thử Classic SPP trước, nếu lỗi tự động chuyển sang BLE GATT!
+        val (sppOk, sppErr) = tryConnectClassicSpp(device, devName)
+        if (sppOk) {
+            saveLastDevice(prefs, connectedAddress, connectedName)
+            return Pair(true, lastStatusMessage)
+        }
+
+        Log.i(TAG, "Classic SPP failed ($sppErr), falling back to BLE GATT for $devName ($address)...")
+        val (bleOk, bleMsg) = connectBleWithRetry(context, adapter, device, devName)
+        if (bleOk) {
+            saveLastDevice(prefs, connectedAddress, connectedName)
+            return Pair(true, bleMsg)
+        }
+
+        lastStatusMessage = "Không kết nối được $devName ($address): $bleMsg"
+        Log.w(TAG, lastStatusMessage)
+        return Pair(false, lastStatusMessage)
+    }
+
+    private fun saveLastDevice(prefs: android.content.SharedPreferences, addr: String, name: String) {
+        prefs.edit()
+            .putString(KEY_LAST_ADDR, addr)
+            .putString(KEY_LAST_NAME, name)
+            .apply()
+    }
+
+    private fun tryConnectClassicSpp(device: BluetoothDevice, devName: String): Pair<Boolean, String> {
+        val address = device.address ?: ""
         val socketFactories = listOf<() -> BluetoothSocket>(
             { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
             { device.createRfcommSocketToServiceRecord(SPP_UUID) },
@@ -281,11 +468,7 @@ object RobonovaBluetoothController {
                 outputStream = candidate.outputStream
                 connectedAddress = address
                 connectedName = devName
-                prefs.edit()
-                    .putString(KEY_LAST_ADDR, address)
-                    .putString(KEY_LAST_NAME, devName)
-                    .apply()
-                lastStatusMessage = "Đã kết nối Bluetooth với $devName ($address)"
+                lastStatusMessage = "Đã kết nối SPP với $devName ($address)"
                 Log.i(TAG, lastStatusMessage)
                 return Pair(true, lastStatusMessage)
             } catch (t: Throwable) {
@@ -296,10 +479,327 @@ object RobonovaBluetoothController {
                 }
             }
         }
+        return Pair(false, lastErr)
+    }
 
-        lastStatusMessage = "Không kết nối được $devName ($address): $lastErr. Kiểm tra nguồn robot người & PIN 1234."
+    private fun connectBleWithRetry(
+        context: Context,
+        adapter: BluetoothAdapter,
+        initialDevice: BluetoothDevice,
+        devName: String
+    ): Pair<Boolean, String> {
+        // Lần 1: Kết nối GATT trực tiếp (dùng lại liên kết BLE đang mở trong Cài đặt Android nếu có)
+        val (ok1, err1) = attemptBleGattOnce(context, initialDevice, devName, 6000L)
+        if (ok1) return Pair(true, err1)
+
+        Log.w(TAG, "BLE GATT attempt #1 failed ($err1), scanning BLE to refresh RPA/cache...")
+        Thread.sleep(250)
+
+        // Lần 2: Quét BLE nhanh để làm mới địa chỉ Random/RPA trong Bluedroid rồi kết nối lại
+        val freshDev = quickScanForBleTarget(adapter, initialDevice.address, 3000L) ?: initialDevice
+        val freshName = try {
+            freshDev.name ?: devName
+        } catch (_: Throwable) {
+            devName
+        }
+        val (ok2, err2) = attemptBleGattOnce(context, freshDev, freshName, 7500L)
+        if (ok2) return Pair(true, err2)
+
+        lastStatusMessage = "Không mở được kênh BLE $freshName: $err2"
         Log.w(TAG, lastStatusMessage)
         return Pair(false, lastStatusMessage)
+    }
+
+    private fun quickScanForBleTarget(
+        adapter: BluetoothAdapter,
+        targetAddress: String?,
+        timeoutMs: Long
+    ): BluetoothDevice? {
+        val scanner = try {
+            adapter.bluetoothLeScanner
+        } catch (_: Throwable) {
+            null
+        } ?: return null
+
+        val latch = CountDownLatch(1)
+        var found: BluetoothDevice? = null
+
+        val cb = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                val dev = result?.device ?: return
+                val addr = dev.address ?: return
+                val name = dev.name ?: result.scanRecord?.deviceName ?: ""
+                if (name.isNotEmpty()) discoveredDevices[addr] = name
+                cachedDeviceObjects[addr] = dev
+
+                val matchAddr = !targetAddress.isNullOrEmpty() && addr.equals(targetAddress, ignoreCase = true)
+                val matchName = scoreDeviceName(name) >= 85
+                if (matchAddr || matchName) {
+                    found = dev
+                    latch.countDown()
+                }
+            }
+        }
+
+        try {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            scanner.startScan(null, settings, cb)
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (t: Throwable) {
+            Log.w(TAG, "quickScanForBleTarget error: ${t.message}")
+        } finally {
+            try {
+                scanner.stopScan(cb)
+            } catch (_: Throwable) {
+            }
+        }
+        return found
+    }
+
+    private fun attemptBleGattOnce(
+        context: Context,
+        device: BluetoothDevice,
+        devName: String,
+        timeoutMs: Long
+    ): Pair<Boolean, String> {
+        val readyLatch = CountDownLatch(1)
+        var failReason = "Hết thời gian chờ phản hồi BLE"
+        var chosenTx: BluetoothGattCharacteristic? = null
+        var chosenNotify: BluetoothGattCharacteristic? = null
+        var localGatt: BluetoothGatt? = null
+
+        val callback = object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                Log.i(TAG, "BLE onConnectionStateChange: status=$status newState=$newState addr=${gatt.device?.address}")
+                if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                    bleConnected.set(true)
+                    mainHandler.postDelayed({
+                        try {
+                            gatt.discoverServices()
+                        } catch (t: Throwable) {
+                            failReason = "Lỗi discoverServices: ${t.message}"
+                            readyLatch.countDown()
+                        }
+                    }, 120)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    val wasCurrent = (gatt == bluetoothGatt)
+                    if (wasCurrent) {
+                        bleConnected.set(false)
+                        bleTxCharacteristic = null
+                        try {
+                            gatt.close()
+                        } catch (_: Throwable) {
+                        }
+                        bluetoothGatt = null
+                    }
+                    if (readyLatch.count > 0) {
+                        failReason = "Ngắt kết nối BLE (status=$status)"
+                        readyLatch.countDown()
+                    }
+                    activeWriteLatch?.countDown()
+                }
+            }
+
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                Log.i(TAG, "BLE onServicesDiscovered: status=$status services=${gatt.services.size}")
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    failReason = "discoverServices thất bại (status=$status)"
+                    readyLatch.countDown()
+                    return
+                }
+
+                val writableCandidates = mutableListOf<BluetoothGattCharacteristic>()
+                for (svc in gatt.services) {
+                    val svcUuid = svc.uuid.toString().lowercase()
+                    Log.i(TAG, "  GATT Service: $svcUuid")
+                    for (chr in svc.characteristics) {
+                        val chrUuid = chr.uuid.toString().lowercase()
+                        val props = chr.properties
+                        Log.i(TAG, "    Characteristic: $chrUuid props=0x${props.toString(16)}")
+                        if (svcUuid in SYSTEM_GATT_SERVICES) continue
+
+                        val canWrite = (props and (
+                            BluetoothGattCharacteristic.PROPERTY_WRITE or
+                                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
+                            )) != 0
+                        val canNotify = (props and (
+                            BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                                BluetoothGattCharacteristic.PROPERTY_INDICATE
+                            )) != 0
+
+                        if (canWrite) writableCandidates.add(chr)
+                        if (canNotify && chosenNotify == null) chosenNotify = chr
+                    }
+                }
+
+                // Ưu tiên override UUID nếu có lưu trong prefs, sau đó theo bảng chuẩn UART, cuối cùng là kênh ghi đầu tiên
+                val customTxUuid = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(KEY_BLE_TX_UUID, null)?.trim()?.lowercase()
+                if (!customTxUuid.isNullOrEmpty()) {
+                    chosenTx = writableCandidates.firstOrNull {
+                        it.uuid.toString().lowercase().contains(customTxUuid)
+                    }
+                }
+                if (chosenTx == null) {
+                    for (prefUuid in PREFERRED_BLE_TX_CHAR_UUIDS) {
+                        val hit = writableCandidates.firstOrNull { it.uuid.toString().equals(prefUuid, ignoreCase = true) }
+                        if (hit != null) {
+                            chosenTx = hit
+                            break
+                        }
+                    }
+                }
+                if (chosenTx == null && writableCandidates.isNotEmpty()) {
+                    chosenTx = writableCandidates.first()
+                }
+
+                if (chosenTx == null) {
+                    failReason = "Không tìm thấy kênh ghi UART trên module BLE"
+                    readyLatch.countDown()
+                    return
+                }
+
+                Log.i(TAG, "Selected BLE UART TX characteristic: ${chosenTx?.uuid} (props=0x${chosenTx?.properties?.toString(16)})")
+
+                // Bật thông báo RX (nếu có) để module BLE UART kích hoạt cầu nối trong suốt
+                chosenNotify?.let { nChr ->
+                    try {
+                        gatt.setCharacteristicNotification(nChr, true)
+                        val cccd = nChr.getDescriptor(CCCD_UUID)
+                        if (cccd != null) {
+                            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            gatt.writeDescriptor(cccd)
+                        }
+                    } catch (_: Throwable) {
+                    }
+                }
+
+                readyLatch.countDown()
+            }
+
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                lastWriteStatus.set(status)
+                activeWriteLatch?.countDown()
+            }
+        }
+
+        val startLatch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                localGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+                } else {
+                    device.connectGatt(context, false, callback)
+                }
+            } catch (t: Throwable) {
+                failReason = t.message ?: t.javaClass.simpleName
+            } finally {
+                startLatch.countDown()
+            }
+        }
+        startLatch.await(1500, TimeUnit.MILLISECONDS)
+
+        val gatt = localGatt ?: return Pair(false, failReason)
+        val finished = readyLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+
+        if (finished && bleConnected.get() && chosenTx != null) {
+            // Chờ ngắn nếu vừa gửi writeDescriptor CCCD
+            if (chosenNotify != null) {
+                Thread.sleep(150)
+            }
+            bluetoothGatt = gatt
+            bleTxCharacteristic = chosenTx
+            connectedAddress = device.address ?: ""
+            connectedName = devName
+            lastStatusMessage = "Đã kết nối BLE với $devName ($connectedAddress)"
+            Log.i(TAG, "$lastStatusMessage [TX=${chosenTx?.uuid}]")
+            return Pair(true, lastStatusMessage)
+        }
+
+        bleConnected.set(false)
+        try {
+            gatt.disconnect()
+        } catch (_: Throwable) {
+        }
+        try {
+            gatt.close()
+        } catch (_: Throwable) {
+        }
+        return Pair(false, failReason)
+    }
+
+    @Synchronized
+    private fun transmitSingleByte(byteVal: Byte): Boolean {
+        // 1. Ưu tiên gửi qua BLE GATT nếu đang kết nối BLE
+        val gatt = bluetoothGatt
+        val txChar = bleTxCharacteristic
+        if (bleConnected.get() && gatt != null && txChar != null) {
+            val props = txChar.properties
+            val preferNoResp = (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+            val primaryWriteType = if (preferNoResp) {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            } else {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            }
+
+            if (writeBleCharacteristicOnce(gatt, txChar, byteVal, primaryWriteType)) {
+                return true
+            }
+            // Dự phòng đổi kiểu ghi nếu module yêu cầu ngược lại
+            val altType = if (preferNoResp) {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            } else {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            }
+            return writeBleCharacteristicOnce(gatt, txChar, byteVal, altType)
+        }
+
+        // 2. Gửi qua Classic RFCOMM OutputStream
+        val out = outputStream ?: return false
+        out.write(byteArrayOf(byteVal))
+        out.flush()
+        return true
+    }
+
+    private fun writeBleCharacteristicOnce(
+        gatt: BluetoothGatt,
+        txChar: BluetoothGattCharacteristic,
+        byteVal: Byte,
+        writeType: Int
+    ): Boolean {
+        val latch = CountDownLatch(1)
+        activeWriteLatch = latch
+        lastWriteStatus.set(-1)
+
+        var initiated = false
+        val postLatch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                txChar.writeType = writeType
+                txChar.value = byteArrayOf(byteVal)
+                initiated = gatt.writeCharacteristic(txChar)
+            } catch (t: Throwable) {
+                Log.w(TAG, "writeCharacteristic exception: ${t.message}")
+                initiated = false
+            } finally {
+                postLatch.countDown()
+            }
+        }
+        postLatch.await(800, TimeUnit.MILLISECONDS)
+        if (!initiated) {
+            activeWriteLatch = null
+            return false
+        }
+
+        val completed = latch.await(1000, TimeUnit.MILLISECONDS)
+        activeWriteLatch = null
+        return completed && lastWriteStatus.get() == BluetoothGatt.GATT_SUCCESS
     }
 
     fun disconnect() {
@@ -308,8 +808,21 @@ object RobonovaBluetoothController {
         }
     }
 
+    @Synchronized
     private fun disconnectBlocking() {
         sequenceRunning.set(false)
+        bleConnected.set(false)
+        bleTxCharacteristic = null
+        try {
+            bluetoothGatt?.disconnect()
+        } catch (_: Throwable) {
+        }
+        try {
+            bluetoothGatt?.close()
+        } catch (_: Throwable) {
+        }
+        bluetoothGatt = null
+
         try {
             outputStream?.close()
         } catch (_: Throwable) {
@@ -324,8 +837,8 @@ object RobonovaBluetoothController {
     }
 
     /**
-     * Gửi 1 byte lệnh ASCII (DEC 40..108) tới mạch MR-C3024FX qua HC-06.
-     * Nếu chưa kết nối thì tự động thử kết nối tới HC-06 đã lưu / ghép đôi.
+     * Gửi 1 byte lệnh ASCII (DEC 40..111) tới mạch SUPER-M V6.1 qua BLE UART hoặc Classic SPP.
+     * Nếu chưa kết nối thì tự động tìm và kết nối tới HC-06 đã lưu / ghép đôi.
      */
     fun sendActionByte(
         context: Context,
@@ -334,7 +847,7 @@ object RobonovaBluetoothController {
         onResult: (Boolean, String) -> Unit
     ) {
         val appCtx = context.applicationContext
-        sequenceRunning.set(false) // Hủy chuỗi cũ nếu có
+        sequenceRunning.set(false)
         worker.execute {
             if (!isConnected) {
                 val (ok, msg) = connectBlocking(appCtx, null)
@@ -344,29 +857,25 @@ object RobonovaBluetoothController {
                 }
             }
             try {
-                val out = outputStream ?: throw IllegalStateException("Chưa có luồng OutputStream")
-                out.write(byteArrayOf(asciiByte.toByte()))
-                out.flush()
-                val msg = "Đã gửi lệnh '$actionLabel' (ASCII '$asciiByte' / '${asciiByte.toChar()}') tới $connectedName"
-                lastStatusMessage = msg
-                Log.i(TAG, msg)
-                mainHandler.post { onResult(true, msg) }
+                if (transmitSingleByte(asciiByte.toByte())) {
+                    val msg = "Đã gửi '$actionLabel' (DEC $asciiByte / '${asciiByte.toChar()}') tới $connectedName"
+                    lastStatusMessage = msg
+                    Log.i(TAG, msg)
+                    mainHandler.post { onResult(true, msg) }
+                    return@execute
+                }
+                throw IllegalStateException("Ghi dữ liệu Bluetooth thất bại")
             } catch (t: Throwable) {
                 Log.w(TAG, "Write error, reconnecting: ${t.message}")
                 disconnectBlocking()
                 val (reOk, reMsg) = connectBlocking(appCtx, null)
-                if (reOk) {
-                    try {
-                        outputStream?.write(byteArrayOf(asciiByte.toByte()))
-                        outputStream?.flush()
-                        val msg = "Đã kết nối lại và gửi '$actionLabel' tới $connectedName"
-                        lastStatusMessage = msg
-                        mainHandler.post { onResult(true, msg) }
-                        return@execute
-                    } catch (_: Throwable) {
-                    }
+                if (reOk && transmitSingleByte(asciiByte.toByte())) {
+                    val msg = "Đã kết nối lại và gửi '$actionLabel' tới $connectedName"
+                    lastStatusMessage = msg
+                    mainHandler.post { onResult(true, msg) }
+                    return@execute
                 }
-                val errMsg = "Lỗi gửi lệnh Bluetooth '$actionLabel': ${t.message ?: reMsg}"
+                val errMsg = "Lỗi gửi lệnh '$actionLabel': ${t.message ?: reMsg}"
                 lastStatusMessage = errMsg
                 mainHandler.post { onResult(false, errMsg) }
             }
@@ -403,9 +912,9 @@ object RobonovaBluetoothController {
                 for (i in bytes.indices) {
                     if (!sequenceRunning.get()) break
                     val b = bytes[i]
-                    val out = outputStream ?: break
-                    out.write(byteArrayOf(b.toByte()))
-                    out.flush()
+                    if (!transmitSingleByte(b.toByte())) {
+                        throw IllegalStateException("Mất kết nối giữa chuỗi động tác")
+                    }
                     Log.i(TAG, "Sequence [$sequenceLabel] step ${i + 1}/${bytes.size}: DEC $b ('${b.toChar()}')")
                     val waitMs = if (i < delaysMs.size) delaysMs[i] else 3500L
                     var slept = 0L

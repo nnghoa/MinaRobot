@@ -69,6 +69,15 @@ class MainActivity : FlutterActivity() {
             val dur = intent.getLongExtra("durationMs", 1500L)
             val btByte = intent.getIntExtra("btByte", -1)
             val btConnectAddr = intent.getStringExtra("btConnect")
+            val btTxUuid = intent.getStringExtra("btTxUuid")
+            if (!btTxUuid.isNullOrEmpty() && context != null) {
+                context.getSharedPreferences("mina_robonova_bt", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("preferred_ble_tx_uuid", if (btTxUuid == "auto") "" else btTxUuid)
+                    .commit()
+                RobonovaBluetoothController.disconnect()
+                android.util.Log.i("RobonovaBT", "Set preferred_ble_tx_uuid=$btTxUuid")
+            }
             val sayText = intent.getStringExtra("say")
             val assistantId = intent.getStringExtra("assistant")
             val resetTopic = intent.getBooleanExtra("resetTopic", false)
