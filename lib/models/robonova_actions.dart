@@ -113,6 +113,11 @@ class RobonovaActionCatalog {
     RobonovaAction(id: 'K66', slug: 'climb_upstair', nameVi: 'Leo cầu thang', asciiByte: 106, category: RobonovaCategory.walking, estimatedMs: 4000),
     RobonovaAction(id: 'K67', slug: 'push_up', nameVi: 'Hít đất (Push Up)', asciiByte: 107, category: RobonovaCategory.danceAcrobatics, estimatedMs: 4500),
     RobonovaAction(id: 'K68', slug: 'dance_3', nameVi: 'Bài nhảy Dance 3', asciiByte: 108, category: RobonovaCategory.danceAcrobatics, estimatedMs: 6000),
+
+    // === NHÓM CẢM BIẾN & TỰ HÀNH SUPER-M V6.1: K69..K71 (DEC 109..111) ===
+    RobonovaAction(id: 'K69', slug: 'auto_explore', nameVi: 'Bật Tự hành (Né vật cản & Tự leo bậc)', asciiByte: 109, category: RobonovaCategory.walking, estimatedMs: 2000),
+    RobonovaAction(id: 'K70', slug: 'stop_auto', nameVi: 'Dừng Tự hành & Đứng nghiêm', asciiByte: 110, category: RobonovaCategory.postureRecovery, estimatedMs: 1500),
+    RobonovaAction(id: 'K71', slug: 'test_sensors', nameVi: 'Test Mắt siêu âm & Cảm biến chân', asciiByte: 111, category: RobonovaCategory.greeting, estimatedMs: 2500),
   ];
 
   static final List<RobonovaCombo> combos = [
@@ -200,6 +205,15 @@ class RobonovaActionCatalog {
       if (act.nameVi.toLowerCase() == q) return act;
     }
 
+    if (q.contains('dừng tự hành') || q.contains('tắt tự hành') || q.contains('đứng yên') || q.contains('dừng lại')) {
+      return findBySlug('stop_auto');
+    }
+    if (q.contains('tự hành') || q.contains('tránh vật cản') || q.contains('né vật cản') || q.contains('tự đi')) {
+      return findBySlug('auto_explore');
+    }
+    if (q.contains('test cảm biến') || q.contains('kiểm tra cảm biến') || q.contains('siêu âm')) {
+      return findBySlug('test_sensors');
+    }
     if (q.contains('break') || q.contains('breakdance')) return findBySlug('break_dance');
     if (q.contains('dance 3') || q.contains('nhảy 3')) return findBySlug('dance_3');
     if (q.contains('dance 2') || q.contains('nhảy 2')) return findBySlug('dance_2');

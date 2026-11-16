@@ -395,11 +395,12 @@ class MinaMcpServer {
       {
         'name': 'self.humanoid.perform',
         'description':
-            'Điều khiển robot hình người Robonova-II (kết nối qua Bluetooth HC-06) biểu diễn quyền thuật, '
+            'Điều khiển robot hình người SUPER-M V6.1 / Robonova-II (kết nối qua Bluetooth HC-06) đi tự hành tránh vật cản '
+            '(dùng mắt siêu âm SONAR(8) & cảm biến chân 10-NK tự leo cầu thang), biểu diễn quyền thuật, '
             'múa võ, nhảy múa, nhảy Break Dance, nhào lộn, trồng chuối, chống đẩy có nhạc, hít đất, đá bóng, '
-            'cúi chào, vỗ tay, bắt tay, hoặc đi lại (63 động tác K1..K68 và 4 bài liên hoàn). '
-            'Hãy gọi công cụ này ngay khi người dùng yêu cầu biểu diễn võ thuật, quyền thuật, nhảy múa, '
-            'trồng chuối, nhào lộn, chống đẩy, cúi chào, vỗ tay...',
+            'cúi chào, vỗ tay, bắt tay, hoặc đi lại (66 động tác K1..K71 và 4 bài liên hoàn). '
+            'Hãy gọi công cụ này ngay khi người dùng yêu cầu tự hành tránh vật cản, dừng tự hành, kiểm tra cảm biến, '
+            'biểu diễn võ thuật, quyền thuật, nhảy múa, trồng chuối, nhào lộn, chống đẩy, cúi chào, vỗ tay...',
         'inputSchema': {
           'type': 'object',
           'properties': {
@@ -407,6 +408,8 @@ class MinaMcpServer {
               'type': 'string',
               'description':
                   'Tên bài biểu diễn hoặc động tác: '
+                  'Tự hành & Cảm biến: "auto_explore" (bật chế độ tự hành tránh vật cản bằng mắt siêu âm & tự leo bậc bằng cảm biến chân), '
+                  '"stop_auto" (dừng chế độ tự hành & đứng nghiêm), "test_sensors" (kiểm tra mắt siêu âm & cảm biến chân). '
                   'Liên hoàn: "kungfu_show" (liên hoàn quyền thuật), "dance_show" (liên hoàn nhảy múa), '
                   '"acrobatics_show" (nhào lộn & trồng chuối), "fitness_show" (thể lực chống đẩy). '
                   'Võ thuật: "martial_arts_1" (khai quyền), "martial_arts_2", "martial_arts_3", "martial_arts_4", '
@@ -420,7 +423,7 @@ class MinaMcpServer {
                   '"hand_shake" (bắt tay), "cheer_up" (cổ vũ), "wave_arms" (vẫy tay), "hands_up" (giơ 2 tay). '
                   'Di chuyển: "walk_forward", "walk_backward", "fast_run", "turn_left", "turn_right", '
                   '"climb_upstair" (leo cầu thang), "sit_down", "stand_up_from_front", "stand_up_from_back", '
-                  'hoặc mã K1..K68.',
+                  'hoặc mã K1..K71.',
             },
           },
           'required': ['action'],

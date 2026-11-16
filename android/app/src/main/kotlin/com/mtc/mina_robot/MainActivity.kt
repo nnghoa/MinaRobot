@@ -83,7 +83,7 @@ class MainActivity : FlutterActivity() {
                     android.util.Log.i("RobonovaBT", "Broadcast btConnect($btConnectAddr) -> ok=$ok, $msg")
                 }
             }
-            if (btByte in 40..108 && context != null) {
+            if (btByte in 40..115 && context != null) {
                 RobonovaBluetoothController.sendActionByte(context, btByte, "DEC-$btByte") { ok, msg ->
                     android.util.Log.i("RobonovaBT", "Broadcast btByte($btByte) -> ok=$ok, $msg")
                 }

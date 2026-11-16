@@ -334,6 +334,24 @@ class _HumanoidBluetoothSheetState extends State<_HumanoidBluetoothSheet> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
+                    '🧭 CẢM BIẾN MẮT SIÊU ÂM & CHÂN 10-NK (TỰ HÀNH)',
+                    style: TextStyle(color: Color(0xFF00F5A0), fontSize: 10.5, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      LauncherMenuScreen._ctrlBtn('🧭 Bật Tự hành (Né cản + Leo bậc)', const Color(0xFF00F5A0),
+                          () => _runQuery('auto_explore')),
+                      LauncherMenuScreen._ctrlBtn('⏹ Dừng Tự hành', const Color(0xFFEF4444),
+                          () => _runQuery('stop_auto')),
+                      LauncherMenuScreen._ctrlBtn('📡 Test Mắt & Chân', const Color(0xFF38BDF8),
+                          () => _runQuery('test_sensors')),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
                     '🔥 BÀI BIỂU DIỄN LIÊN HOÀN (COMBO)',
                     style: TextStyle(color: Color(0xFFFF9F1C), fontSize: 10.5, fontWeight: FontWeight.bold),
                   ),
