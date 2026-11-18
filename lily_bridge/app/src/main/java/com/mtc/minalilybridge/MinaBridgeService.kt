@@ -55,6 +55,9 @@ class MinaBridgeService : Service() {
         const val KEY_PLAY_BEEP = "play_beep"
         const val KEY_NOD_ON_WAKE = "nod_on_wake"
         const val KEY_LOCK_LANDSCAPE = "lock_landscape"
+        const val KEY_HAL_AUDIO_PARAM = "hal_audio_param"
+        const val KEY_MIC_ROUTE = "mic_route"
+        const val KEY_SW_GAIN_X10 = "sw_gain_x10"
         const val KEY_KW_SCHEMA_VER = "kw_schema_ver"
 
         const val ACTION_START_LISTENING = "com.mtc.mina_lily_bridge.START_LISTENING"
@@ -513,31 +516,54 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
         }
     }
 
+    private fun applyHardwareAudioParams() {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val halParam = prefs.getString(KEY_HAL_AUDIO_PARAM, "") ?: ""
+            if (halParam.isNotBlank()) {
+                audioManager.setParameters(halParam)
+                Log.i(TAG, "Applied HAL audio param: $halParam")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "applyHardwareAudioParams warning: ${t.message}")
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun openMic(): Triple<AudioRecord?, AcousticEchoCanceler?, NoiseSuppressor?> {
+        applyHardwareAudioParams()
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val route = prefs.getInt(KEY_MIC_ROUTE, 0)
         val sampleRate = 16000
+        val useStereo = (route == 1 || route == 2)
+        val chMask = if (useStereo) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
+        val preferredSource = when (route) {
+            5 -> MediaRecorder.AudioSource.CAMCORDER
+            6 -> MediaRecorder.AudioSource.VOICE_RECOGNITION
+            7 -> MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            else -> MediaRecorder.AudioSource.MIC
+        }
         val minBuf = AudioRecord.getMinBufferSize(
             sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
+            chMask,
             AudioFormat.ENCODING_PCM_16BIT
         )
         if (minBuf <= 0) return Triple(null, null, null)
-        // Bộ đệm 64KB (~2 giây PCM16 @ 16kHz) đảm bảo AudioFlinger trên MT8167S không bao giờ tràn bộ đệm
-        val bufSize = (minBuf * 8).coerceAtLeast(65536)
+        // Bộ đệm 64KB+ đảm bảo AudioFlinger trên MT8167S không bao giờ tràn bộ đệm
+        val bufSize = (minBuf * 8).coerceAtLeast(if (useStereo) 131072 else 65536)
 
         return try {
-            // Ưu tiên AudioSource.MIC (source=1) giống hệt Lily & Mina_Visbot để kích hoạt mạch khuếch đại Mic phần cứng
             val rec = try {
                 AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    preferredSource,
                     sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
+                    chMask,
                     AudioFormat.ENCODING_PCM_16BIT,
                     bufSize
                 )
             } catch (_: Throwable) {
                 AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC,
                     sampleRate,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
@@ -570,7 +596,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                 rec.release()
                 return Triple(null, null, null)
             }
-            Log.i(TAG, "Opened MIC (session=${rec.audioSessionId}, buf=$bufSize)")
+            Log.i(TAG, "Opened MIC (route=$route, stereo=$useStereo, session=${rec.audioSessionId}, buf=$bufSize)")
             Triple(rec, aec, ns)
         } catch (e: Throwable) {
             Log.e(TAG, "openMic failed: ${e.message}")
@@ -666,27 +692,48 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
             }
             micThreadActive.set(true)
 
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val route = prefs.getInt(KEY_MIC_ROUTE, 0)
+            val gainX10 = prefs.getInt(KEY_SW_GAIN_X10, 22).coerceIn(5, 120)
+            val isStereo = (rec.channelCount == 2)
+
             val reader = Thread({
                 Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-                val frame = ShortArray(960) // 60ms @ 16kHz
+                val readBuf = ShortArray(if (isStereo) 1920 else 960) // 60ms @ 16kHz
+                val monoFrame = ShortArray(960)
                 var silentFrames = 0
                 var exactZeroFrames = 0
+                var hpfPrevX = 0f
+                var hpfPrevY = 0f
+                var hpfInitialized = false
 
                 while (micThreadActive.get() && workerRunning.get()) {
-                    val n = try {
-                        rec.read(frame, 0, frame.size)
+                    val nRead = try {
+                        rec.read(readBuf, 0, readBuf.size)
                     } catch (_: Throwable) {
                         -1
                     }
-                    if (n <= 0) {
+                    if (nRead <= 0) {
                         if (!micThreadActive.get()) break
                         Thread.sleep(20)
                         continue
                     }
 
+                    val monoCount = if (isStereo) (nRead / 2) else nRead
+                    if (monoCount <= 0) continue
+
+                    if (isStereo) {
+                        val pickRight = (route == 2)
+                        for (i in 0 until monoCount) {
+                            monoFrame[i] = readBuf[i * 2 + (if (pickRight) 1 else 0)]
+                        }
+                    } else {
+                        System.arraycopy(readBuf, 0, monoFrame, 0, monoCount)
+                    }
+
                     var rawMax = 0
-                    for (i in 0 until n step 2) {
-                        val v = kotlin.math.abs(frame[i].toInt())
+                    for (i in 0 until monoCount step 2) {
+                        val v = kotlin.math.abs(monoFrame[i].toInt())
                         if (v > rawMax) rawMax = v
                     }
 
@@ -701,12 +748,21 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                         exactZeroFrames = 0
                     }
 
-                    // Khuếch đại phần mềm ×2.2 (có kẹp bão hòa mềm) giúp bắt nhạy câu gọi từ khoảng cách 1–3m trên Visbot
+                    // Bộ lọc thông cao bậc 1 (DC-Blocker HPF fc ~ 13Hz) triệt tiêu hoàn toàn lệch áp DC & ù nguồn 50Hz trên codec MT8167S
+                    if (!hpfInitialized) {
+                        hpfPrevX = monoFrame[0].toFloat()
+                        hpfPrevY = 0f
+                        hpfInitialized = true
+                    }
                     var boostedMax = 0
-                    for (i in 0 until n) {
-                        val boosted = (frame[i].toInt() * 22) / 10
+                    for (i in 0 until monoCount) {
+                        val xf = monoFrame[i].toFloat()
+                        val yf = (xf - hpfPrevX) + 0.995f * hpfPrevY
+                        hpfPrevX = xf
+                        hpfPrevY = yf
+                        val boosted = ((yf * gainX10) / 10f).toInt()
                         val clamped = boosted.coerceIn(-32768, 32767)
-                        frame[i] = clamped.toShort()
+                        monoFrame[i] = clamped.toShort()
                         val absV = kotlin.math.abs(clamped)
                         if (absV > boostedMax) boostedMax = absV
                     }
@@ -723,13 +779,13 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                     }
 
                     synchronized(queueLock) {
-                        if (queueLen + n > maxQueueSamples) {
-                            val drop = (queueLen + n) - maxQueueSamples
+                        if (queueLen + monoCount > maxQueueSamples) {
+                            val drop = (queueLen + monoCount) - maxQueueSamples
                             System.arraycopy(sampleQueue, drop, sampleQueue, 0, queueLen - drop)
                             queueLen -= drop
                         }
-                        System.arraycopy(frame, 0, sampleQueue, queueLen, n)
-                        queueLen += n
+                        System.arraycopy(monoFrame, 0, sampleQueue, queueLen, monoCount)
+                        queueLen += monoCount
                         queueLock.notifyAll()
                     }
                 }
@@ -749,8 +805,10 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
             while (workerRunning.get()) {
                 val now = System.currentTimeMillis()
 
-                // 1. Nạp lại cấu hình độ nhạy / từ khóa nếu vừa chỉnh
+                // 1. Nạp lại cấu hình độ nhạy / từ khóa / kênh Mic nếu vừa chỉnh
                 if (reloadRequested.getAndSet(false)) {
+                    stopActiveCapture()
+                    applyHardwareAudioParams()
                     MinaKwsNative.nativeDestroy(kwsHandle)
                     kwsHandle = createSpotterFromPrefs(modelDir)
                     if (kwsHandle == 0L) {
@@ -765,7 +823,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                     yielded = true
                     seenExternalRecorderDuringYield = false
                     externalSilentSinceMs = 0L
-                    yieldGraceUntilMs = System.currentTimeMillis() + 7500L
+                    yieldGraceUntilMs = System.currentTimeMillis() + 9000L
                     triggerLilyConversation("Gọi nhanh")
                     updateState(STATE_YIELDED, "Đang nhường Mic cho Lily VIP đàm thoại...")
                     continue
@@ -780,13 +838,18 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                     continue
                 }
 
-                // 4. Trạng thái ĐANG NHƯỜNG MIC CHO LILY VIP
+                // 4. Trạng thái ĐANG NHƯỜNG MIC CHO LILY VIP (Hỗ trợ bán song công: chờ cả lúc Lily đang phát giọng nói TTS!)
                 if (yielded) {
                     val lilyRecording = hasExternalRecorder(-1)
+                    val lilySpeakingTts = audioManager.isMusicActive ||
+                        audioManager.mode == AudioManager.MODE_IN_COMMUNICATION
                     if (lilyRecording) {
                         seenExternalRecorderDuringYield = true
                         externalSilentSinceMs = 0L
-                        updateState(STATE_YIELDED, "Lily VIP đang giữ Mic đàm thoại...")
+                        updateState(STATE_YIELDED, "Lily VIP đang nghe đàm thoại...")
+                    } else if (seenExternalRecorderDuringYield && lilySpeakingTts) {
+                        externalSilentSinceMs = 0L
+                        updateState(STATE_YIELDED, "Lily VIP đang trả lời (giữ nhường Mic)...")
                     } else {
                         if (now < yieldGraceUntilMs && !seenExternalRecorderDuringYield) {
                             Thread.sleep(350)
@@ -794,7 +857,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                         }
                         if (externalSilentSinceMs == 0L) {
                             externalSilentSinceMs = now
-                        } else if (now - externalSilentSinceMs >= 2600L) {
+                        } else if (now - externalSilentSinceMs >= 5200L) {
                             yielded = false
                             seenExternalRecorderDuringYield = false
                             externalSilentSinceMs = 0L
@@ -926,6 +989,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
         val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         lastTriggerInfo = "$reason lúc $ts"
         applyRotationLockPolicy()
+        applyHardwareAudioParams()
 
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager

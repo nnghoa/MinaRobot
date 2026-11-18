@@ -31,19 +31,19 @@ jobs:
       - name: Build Pure Native Release APK (armeabi-v7a)
         run: |
           gradle -p lily_bridge assembleRelease --no-daemon --stacktrace
-          cp lily_bridge/app/build/outputs/apk/release/app-release.apk Mina_Lily_Bridge_v1.0.4_release.apk
-          ls -lh Mina_Lily_Bridge_v1.0.4_release.apk
+          cp lily_bridge/app/build/outputs/apk/release/app-release.apk Mina_Lily_Bridge_v1.0.5_release.apk
+          ls -lh Mina_Lily_Bridge_v1.0.5_release.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Mina_Lily_Bridge_v1.0.4_release
-          path: Mina_Lily_Bridge_v1.0.4_release.apk
+          name: Mina_Lily_Bridge_v1.0.5_release
+          path: Mina_Lily_Bridge_v1.0.5_release.apk
 
       - name: Publish Release Asset for Direct Download
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: lily-bridge-v1.0.4
-          name: "Mina Lily Bridge v1.0.4 (Permanent 308x240 Landscape Lock + UBTECH ROSA Motor + Sherpa-ONNX)"
-          files: Mina_Lily_Bridge_v1.0.4_release.apk
+          tag_name: lily-bridge-v1.0.5
+          name: "Mina Lily Bridge v1.0.5 (Hardware Mic Diagnostics + DC-Blocker HPF + HAL Mic Switch + Half-Duplex TTS Hand-off)"
+          files: Mina_Lily_Bridge_v1.0.5_release.apk
           prerelease: false
