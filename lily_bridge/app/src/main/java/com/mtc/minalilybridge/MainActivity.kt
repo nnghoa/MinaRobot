@@ -10,10 +10,12 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -367,8 +369,42 @@ class MainActivity : Activity() {
             }
         )
 
-        // 5. Tùy chọn khởi động cùng Robot & Tiếng báo "Ting"
+        // 5. Tùy chọn khóa màn hình ngang 308x240, khởi động cùng Robot & Tiếng báo "Ting"
         val prefs = getSharedPreferences(MinaBridgeService.PREFS_NAME, Context.MODE_PRIVATE)
+        val cbLockLandscape = CheckBox(this).apply {
+            text = "Khóa cố định màn hình ngang 308×240 (chống xoay dọc)"
+            textSize = 10.5f
+            isChecked = prefs.getBoolean(MinaBridgeService.KEY_LOCK_LANDSCAPE, true)
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean(MinaBridgeService.KEY_LOCK_LANDSCAPE, checked).apply()
+                if (checked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    if (!Settings.System.canWrite(this@MainActivity)) {
+                        try {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                        } catch (_: Throwable) {
+                        }
+                    } else if (!Settings.canDrawOverlays(this@MainActivity)) {
+                        try {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                        } catch (_: Throwable) {
+                        }
+                    }
+                }
+                sendServiceAction(MinaBridgeService.ACTION_APPLY_ROTATION_LOCK)
+            }
+        }
+        root.addView(cbLockLandscape)
+
         val cbAutoBoot = CheckBox(this).apply {
             text = "Tự chạy ngầm khi bật nguồn Robot"
             textSize = 10.5f

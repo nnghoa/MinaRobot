@@ -6,8 +6,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ActivityInfo
+import android.database.ContentObserver
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -21,7 +27,11 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
+import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -44,6 +54,7 @@ class MinaBridgeService : Service() {
         const val KEY_AUTO_BOOT = "auto_boot"
         const val KEY_PLAY_BEEP = "play_beep"
         const val KEY_NOD_ON_WAKE = "nod_on_wake"
+        const val KEY_LOCK_LANDSCAPE = "lock_landscape"
         const val KEY_KW_SCHEMA_VER = "kw_schema_ver"
 
         const val ACTION_START_LISTENING = "com.mtc.mina_lily_bridge.START_LISTENING"
@@ -52,6 +63,7 @@ class MinaBridgeService : Service() {
         const val ACTION_WAKE_LILY_NOW = "com.mtc.mina_lily_bridge.WAKE_LILY_NOW"
         const val ACTION_YIELD_30S = "com.mtc.mina_lily_bridge.YIELD_30S"
         const val ACTION_MOTOR_CMD = "com.mtc.mina_lily_bridge.MOTOR_CMD"
+        const val ACTION_APPLY_ROTATION_LOCK = "com.mtc.mina_lily_bridge.APPLY_ROTATION_LOCK"
         const val ACTION_UI_UPDATE = "com.mtc.mina_lily_bridge.UI_UPDATE"
 
         const val LILY_PKG = "com.sensornotes.xiaozhi"
@@ -168,15 +180,33 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
     private var mcpServer: MinaLocalMcpServer? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private lateinit var audioManager: AudioManager
+    private lateinit var windowManager: WindowManager
+    private var landscapeOverlayView: View? = null
+    private var rotationWatchRegistered = false
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val rotationSettingsObserver = object : ContentObserver(mainHandler) {
+        override fun onChange(selfChange: Boolean) {
+            enforceSystemRotationSettings()
+        }
+    }
+
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            applyRotationLockPolicy()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         createNotificationChannel()
         startForeground(NOTIF_ID, buildNotification("Đang khởi tạo cầu nối Mina -> Lily VIP..."))
 
         acquireCpuWakeLock()
+        registerRotationWatchers()
+        applyRotationLockPolicy()
         VisbotMotorController.onFrontSensorPressed = { sensorId ->
             Log.i(TAG, "Physical Visbot touch/button pressed ($sensorId) -> waking Lily VIP")
             if (workerRunning.get()) {
@@ -197,8 +227,12 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        applyRotationLockPolicy()
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         when (intent?.action) {
+            ACTION_APPLY_ROTATION_LOCK -> {
+                applyRotationLockPolicy()
+            }
             ACTION_PAUSE_LISTENING -> {
                 prefs.edit().putBoolean(KEY_ENABLED, false).apply()
                 stopWorker()
@@ -253,6 +287,8 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
 
     override fun onDestroy() {
         stopWorker()
+        unregisterRotationWatchers()
+        updateLandscapeOverlay(false)
         mcpServer?.stop()
         mcpServer = null
         releaseCpuWakeLock()
@@ -260,6 +296,125 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun registerRotationWatchers() {
+        if (rotationWatchRegistered) return
+        try {
+            contentResolver.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.ACCELEROMETER_ROTATION),
+                false,
+                rotationSettingsObserver
+            )
+            contentResolver.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.USER_ROTATION),
+                false,
+                rotationSettingsObserver
+            )
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_CONFIGURATION_CHANGED)
+            }
+            registerReceiver(screenStateReceiver, filter)
+            rotationWatchRegistered = true
+        } catch (t: Throwable) {
+            Log.w(TAG, "registerRotationWatchers warning: ${t.message}")
+        }
+    }
+
+    private fun unregisterRotationWatchers() {
+        if (!rotationWatchRegistered) return
+        rotationWatchRegistered = false
+        try {
+            contentResolver.unregisterContentObserver(rotationSettingsObserver)
+        } catch (_: Throwable) {
+        }
+        try {
+            unregisterReceiver(screenStateReceiver)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun applyRotationLockPolicy() {
+        val lock = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_LOCK_LANDSCAPE, true)
+        if (lock) {
+            enforceSystemRotationSettings()
+        }
+        mainHandler.post {
+            updateLandscapeOverlay(lock)
+        }
+    }
+
+    private fun enforceSystemRotationSettings() {
+        val lock = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_LOCK_LANDSCAPE, true)
+        if (!lock) return
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.System.canWrite(this)) {
+                val cr = contentResolver
+                if (Settings.System.getInt(cr, Settings.System.ACCELEROMETER_ROTATION, 0) != 0) {
+                    Settings.System.putInt(cr, Settings.System.ACCELEROMETER_ROTATION, 0)
+                    Log.i(TAG, "Locked Settings.System.ACCELEROMETER_ROTATION -> 0 (308x240)")
+                }
+                if (Settings.System.getInt(cr, Settings.System.USER_ROTATION, 0) != 0) {
+                    Settings.System.putInt(cr, Settings.System.USER_ROTATION, 0)
+                    Log.i(TAG, "Locked Settings.System.USER_ROTATION -> 0 (308x240)")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "enforceSystemRotationSettings warning: ${t.message}")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun updateLandscapeOverlay(enable: Boolean) {
+        if (!enable) {
+            val existing = landscapeOverlayView ?: return
+            landscapeOverlayView = null
+            try {
+                windowManager.removeViewImmediate(existing)
+                Log.i(TAG, "Removed Landscape Lock Overlay")
+            } catch (_: Throwable) {
+            }
+            return
+        }
+
+        if (landscapeOverlayView != null) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            return
+        }
+
+        try {
+            val v = View(applicationContext).apply {
+                setBackgroundColor(Color.TRANSPARENT)
+            }
+            val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY
+            }
+            val lp = WindowManager.LayoutParams(
+                0,
+                0,
+                overlayType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                title = "MinaVisbotLandscapeLock"
+            }
+            windowManager.addView(v, lp)
+            landscapeOverlayView = v
+            Log.i(TAG, "Attached 0x0 Landscape Lock Overlay (SCREEN_ORIENTATION_LANDSCAPE, 308x240)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "updateLandscapeOverlay failed: ${t.message}")
+        }
+    }
 
     private fun acquireCpuWakeLock() {
         try {
@@ -682,6 +837,9 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                 }
 
                 checkExtCounter++
+                if (checkExtCounter % 20 == 0) {
+                    applyRotationLockPolicy()
+                }
                 val curRec = audioRecord
                 if (curRec != null && checkExtCounter % 6 == 0 && hasExternalRecorder(curRec.audioSessionId)) {
                     stopActiveCapture()
@@ -767,6 +925,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
     private fun triggerLilyConversation(reason: String) {
         val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         lastTriggerInfo = "$reason lúc $ts"
+        applyRotationLockPolicy()
 
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
