@@ -30,6 +30,7 @@ import android.os.Process
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import java.io.File
@@ -45,7 +46,7 @@ class MinaBridgeService : Service() {
         private const val TAG = "MinaBridgeSvc"
         private const val NOTIF_CHANNEL_ID = "mina_lily_bridge_channel"
         private const val NOTIF_ID = 1808
-        private const val CURRENT_KW_SCHEMA_VERSION = 3
+        private const val CURRENT_KW_SCHEMA_VERSION = 4
 
         const val PREFS_NAME = "mina_lily_bridge_prefs"
         const val KEY_ENABLED = "listening_enabled"
@@ -176,6 +177,9 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
     private val workerRunning = AtomicBoolean(false)
     private val reloadRequested = AtomicBoolean(false)
     private val manualWakeRequested = AtomicBoolean(false)
+    private val touchYieldRequested = AtomicBoolean(false)
+    @Volatile
+    private var activeQueueLock: Object? = null
     @Volatile
     private var forceYieldUntilMs: Long = 0L
 
@@ -370,6 +374,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     @Suppress("DEPRECATION")
     private fun updateLandscapeOverlay(enable: Boolean) {
         if (!enable) {
@@ -391,6 +396,15 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
         try {
             val v = View(applicationContext).apply {
                 setBackgroundColor(Color.TRANSPARENT)
+                setOnTouchListener { _, event ->
+                    if (event.actionMasked == MotionEvent.ACTION_OUTSIDE && !MainActivity.isInForeground) {
+                        if (workerRunning.get() && currentState == STATE_LISTENING) {
+                            touchYieldRequested.set(true)
+                            activeQueueLock?.let { lk -> synchronized(lk) { lk.notifyAll() } }
+                        }
+                    }
+                    false
+                }
             }
             val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -402,8 +416,8 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                 0,
                 overlayType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             ).apply {
@@ -413,7 +427,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
             }
             windowManager.addView(v, lp)
             landscapeOverlayView = v
-            Log.i(TAG, "Attached 0x0 Landscape Lock Overlay (SCREEN_ORIENTATION_LANDSCAPE, 308x240)")
+            Log.i(TAG, "Attached 0x0 Landscape Lock + OutsideTouch Mic-Yield Overlay (308x240)")
         } catch (t: Throwable) {
             Log.w(TAG, "updateLandscapeOverlay failed: ${t.message}")
         }
@@ -484,18 +498,20 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
             kwFile.writeText(DEFAULT_KEYWORDS_V2, Charsets.UTF_8)
             prefs.edit()
                 .putInt(KEY_KW_SCHEMA_VER, CURRENT_KW_SCHEMA_VERSION)
-                .putFloat(KEY_SCORE, 1.8f)
-                .putFloat(KEY_THRESHOLD, 0.15f)
+                .putInt(KEY_MIC_ROUTE, 6)
+                .putInt(KEY_SW_GAIN_X10, 55)
+                .putFloat(KEY_SCORE, 2.0f)
+                .putFloat(KEY_THRESHOLD, 0.13f)
                 .apply()
-            Log.i(TAG, "Upgraded keywords.txt to v$CURRENT_KW_SCHEMA_VERSION (Hello Mina + 0.15 threshold)")
+            Log.i(TAG, "Upgraded keywords/audio schema to v$CURRENT_KW_SCHEMA_VERSION (VR FIR + 5.5x gain + 0.13 threshold)")
         }
         return modelDir
     }
 
     private fun createSpotterFromPrefs(modelDir: File): Long {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val score = prefs.getFloat(KEY_SCORE, 1.8f)
-        val threshold = prefs.getFloat(KEY_THRESHOLD, 0.15f)
+        val score = prefs.getFloat(KEY_SCORE, 2.0f)
+        val threshold = prefs.getFloat(KEY_THRESHOLD, 0.13f)
         return MinaKwsNative.nativeCreate(
             File(modelDir, "encoder.int8.onnx").absolutePath,
             File(modelDir, "decoder.onnx").absolutePath,
@@ -533,7 +549,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
     private fun openMic(): Triple<AudioRecord?, AcousticEchoCanceler?, NoiseSuppressor?> {
         applyHardwareAudioParams()
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val route = prefs.getInt(KEY_MIC_ROUTE, 0)
+        val route = prefs.getInt(KEY_MIC_ROUTE, 6)
         val sampleRate = 16000
         val useStereo = (route == 1 || route == 2)
         val chMask = if (useStereo) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
@@ -651,6 +667,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
 
         // Hàng đợi mẫu PCM giữa MicReaderThread và KwsDecodeThread (tối đa 6400 mẫu = 400ms)
         val queueLock = Object()
+        activeQueueLock = queueLock
         val maxQueueSamples = 6400
         val sampleQueue = ShortArray(maxQueueSamples)
         var queueLen = 0
@@ -693,8 +710,8 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
             micThreadActive.set(true)
 
             val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val route = prefs.getInt(KEY_MIC_ROUTE, 0)
-            val gainX10 = prefs.getInt(KEY_SW_GAIN_X10, 22).coerceIn(5, 120)
+            val route = prefs.getInt(KEY_MIC_ROUTE, 6)
+            val gainX10 = prefs.getInt(KEY_SW_GAIN_X10, 55).coerceIn(5, 120)
             val isStereo = (rec.channelCount == 2)
 
             val reader = Thread({
@@ -829,6 +846,18 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                     continue
                 }
 
+                // 2b. Người dùng chạm trực tiếp vào màn hình Lily -> nhả Mic ngay lập tức (< 3ms) trước khi nhấc tay!
+                if (touchYieldRequested.getAndSet(false)) {
+                    Log.i(TAG, "Outside screen touch -> instant Mic yield for Lily touch-to-talk")
+                    stopActiveCapture()
+                    yielded = true
+                    seenExternalRecorderDuringYield = false
+                    externalSilentSinceMs = 0L
+                    yieldGraceUntilMs = System.currentTimeMillis() + 4500L
+                    updateState(STATE_YIELDED, "Chạm màn hình -> Nhường Mic cho Lily VIP...")
+                    continue
+                }
+
                 // 3. Tạm nhường Mic 30s từ thông báo
                 if (now < forceYieldUntilMs) {
                     if (audioRecord != null) stopActiveCapture()
@@ -916,7 +945,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                 // 6. Chờ lấy lô mẫu âm thanh từ hàng đợi mà không giữ khóa khi giải mã ONNX
                 var chunk: ShortArray? = null
                 synchronized(queueLock) {
-                    if (queueLen == 0 && workerRunning.get() && !manualWakeRequested.get() && !reloadRequested.get()) {
+                    if (queueLen == 0 && workerRunning.get() && !manualWakeRequested.get() && !touchYieldRequested.get() && !reloadRequested.get()) {
                         queueLock.wait(300)
                     }
                     if (queueLen > 0) {
@@ -976,6 +1005,7 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
             Log.e(TAG, "Orchestrator loop crashed: ${t.message}", t)
             updateState(STATE_ERROR, "Lỗi luồng âm thanh: ${t.message}")
         } finally {
+            activeQueueLock = null
             stopActiveCapture()
             if (kwsHandle != 0L) {
                 MinaKwsNative.nativeDestroy(kwsHandle)

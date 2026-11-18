@@ -182,7 +182,7 @@ class MinaLocalMcpServer(private val appContext: Context) {
                         val info = JSONObject()
                             .put("status", "ok")
                             .put("service", "MinaLilyBridge")
-                            .put("version", "1.0.5")
+                            .put("version", "1.0.6")
                             .put("mcpEndpoint", "http://127.0.0.1:$PORT/mcp")
                             .put("state", MinaBridgeService.currentState)
                             .put("detail", MinaBridgeService.statusDetail)

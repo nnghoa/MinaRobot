@@ -11,8 +11,8 @@ android {
         applicationId = "com.mtc.mina_lily_bridge"
         minSdk = 24
         targetSdk = 33
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 6
+        versionName = "1.0.6"
 
         ndk {
             abiFilters "armeabi-v7a"

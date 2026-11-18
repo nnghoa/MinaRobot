@@ -34,6 +34,11 @@ import android.widget.Toast
  */
 class MainActivity : Activity() {
 
+    companion object {
+        @Volatile
+        var isInForeground: Boolean = false
+    }
+
     private lateinit var tvStateBadge: TextView
     private lateinit var tvDetail: TextView
     private lateinit var tvLastTrigger: TextView
@@ -64,6 +69,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        isInForeground = true
         val filter = IntentFilter(MinaBridgeService.ACTION_UI_UPDATE)
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(uiReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -76,6 +82,7 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        isInForeground = false
         uiHandler.removeCallbacks(meterRunnable)
         try {
             unregisterReceiver(uiReceiver)
@@ -332,9 +339,9 @@ class MainActivity : Activity() {
 
         val rowSens = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val presets = listOf(
-            Triple(0.11f, "Rất nhạy", "0.11"),
-            Triple(0.15f, "Chuẩn", "0.15"),
-            Triple(0.24f, "Chống ồn", "0.24")
+            Triple(0.10f, "Rất nhạy", "0.10"),
+            Triple(0.13f, "Chuẩn", "0.13"),
+            Triple(0.22f, "Chống ồn", "0.22")
         )
         val btnList = mutableListOf<Pair<Float, Button>>()
         for ((idx, item) in presets.withIndex()) {
@@ -503,7 +510,7 @@ class MainActivity : Activity() {
 
     private fun updateSensitivityButtonStyles() {
         val cur = getSharedPreferences(MinaBridgeService.PREFS_NAME, Context.MODE_PRIVATE)
-            .getFloat(MinaBridgeService.KEY_THRESHOLD, 0.15f)
+            .getFloat(MinaBridgeService.KEY_THRESHOLD, 0.13f)
         for ((thr, btn) in sensitivityButtons) {
             val active = kotlin.math.abs(cur - thr) < 0.01f
             btn.setTextColor(if (active) Color.WHITE else Color.parseColor("#1E293B"))
