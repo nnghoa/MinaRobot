@@ -35,7 +35,7 @@ class MinaBridgeService : Service() {
         private const val TAG = "MinaBridgeSvc"
         private const val NOTIF_CHANNEL_ID = "mina_lily_bridge_channel"
         private const val NOTIF_ID = 1808
-        private const val CURRENT_KW_SCHEMA_VERSION = 2
+        private const val CURRENT_KW_SCHEMA_VERSION = 3
 
         const val PREFS_NAME = "mina_lily_bridge_prefs"
         const val KEY_ENABLED = "listening_enabled"
@@ -43,6 +43,7 @@ class MinaBridgeService : Service() {
         const val KEY_SCORE = "kws_score"
         const val KEY_AUTO_BOOT = "auto_boot"
         const val KEY_PLAY_BEEP = "play_beep"
+        const val KEY_NOD_ON_WAKE = "nod_on_wake"
         const val KEY_KW_SCHEMA_VER = "kw_schema_ver"
 
         const val ACTION_START_LISTENING = "com.mtc.mina_lily_bridge.START_LISTENING"
@@ -50,6 +51,7 @@ class MinaBridgeService : Service() {
         const val ACTION_RELOAD_CONFIG = "com.mtc.mina_lily_bridge.RELOAD_CONFIG"
         const val ACTION_WAKE_LILY_NOW = "com.mtc.mina_lily_bridge.WAKE_LILY_NOW"
         const val ACTION_YIELD_30S = "com.mtc.mina_lily_bridge.YIELD_30S"
+        const val ACTION_MOTOR_CMD = "com.mtc.mina_lily_bridge.MOTOR_CMD"
         const val ACTION_UI_UPDATE = "com.mtc.mina_lily_bridge.UI_UPDATE"
 
         const val LILY_PKG = "com.sensornotes.xiaozhi"
@@ -60,20 +62,8 @@ class MinaBridgeService : Service() {
         const val STATE_YIELDED = "YIELDED"
         const val STATE_ERROR = "ERROR"
 
-        // Bộ từ khóa mở rộng v2: Bao phủ đầy đủ "Hello Mina", "Hi Mina", "Hey Mina", "Xin chào Mina", "Chào Mina", "Mina ơi", "Mina"
+        // Bộ từ khóa mở rộng v3: Gọi Lily VIP + Khẩu lệnh chuyển động Offline (Tiến, Lùi, Quay trái/phải, Gật đầu, Nhảy, Dừng)
         val DEFAULT_KEYWORDS_V2 = """
-m ī n ā @Mina
-m í n á @Mina
-m ì n à @Mina
-m ī n a @Mina
-m í n a @Mina
-m i n a @Mina
-m ǐ n ǎ @Mina
-M IY1 N AA0 @Mina
-M IY1 N AH0 @Mina
-M IY0 N AA0 @Mina
-M IH1 N AH0 @Mina
-M IH0 N AH0 @Mina
 HH AH0 L OW1 M IY1 N AA0 @Hello_Mina
 HH EH0 L OW1 M IY1 N AA0 @Hello_Mina
 HH AH0 L OW1 M IY1 N AH0 @Hello_Mina
@@ -106,6 +96,39 @@ m ī n ā ēi @Mina_ơi
 m í n a āi @Mina_ơi
 M IY1 N AA0 ER1 @Mina_ơi
 M IY1 N AH0 OY1 @Mina_ơi
+m ī n ā @Mina
+m í n á @Mina
+m ì n à @Mina
+m ī n a @Mina
+m í n a @Mina
+m i n a @Mina
+m ǐ n ǎ @Mina
+M IY1 N AA0 @Mina
+M IY1 N AH0 @Mina
+M IY0 N AA0 @Mina
+M IH1 N AH0 @Mina
+M IH0 N AH0 @Mina
+m ī n ā t iàn l ēn @Motor_Forward
+m ī n ā d iàn l ēn @Motor_Forward
+m ī n ā ch ài d èi @Motor_Forward
+M IY1 N AA0 T IY1 N L EH1 N @Motor_Forward
+M IY1 N AA0 CH AY1 T ER1 Y @Motor_Forward
+m ī n ā l uì l ài @Motor_Backward
+m ī n ā ch ài l uí @Motor_Backward
+M IY1 N AA0 L UW1 Y L AY1 @Motor_Backward
+M IY1 N AA0 CH AY1 L UW1 Y @Motor_Backward
+m ī n ā g uāi zh ái @Motor_Left
+m ī n ā k uāi ch ái @Motor_Left
+M IY1 N AA0 K W AY1 CH AY1 @Motor_Left
+m ī n ā g uāi f ǎi @Motor_Right
+m ī n ā k uāi f ái @Motor_Right
+M IY1 N AA0 K W AY1 F AY1 @Motor_Right
+m ī n ā g è d òu @Motor_Nod
+M IY1 N AA0 G AH1 T D AW1 @Motor_Nod
+m ī n ā n iǎ d ī @Motor_Dance
+m ī n ā n iá m uá @Motor_Dance
+M IY1 N AA0 N AY1 D IY1 @Motor_Dance
+M IY1 N AA0 D AE1 N S @Motor_Dance
 m ī n ā y íng l ài @Mina_dừng_lại
 m ī n ā r éng l ài @Mina_dừng_lại
 M IY1 N AA0 Z IH1 NG L AY1 @Mina_dừng_lại
@@ -154,6 +177,15 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
         startForeground(NOTIF_ID, buildNotification("Đang khởi tạo cầu nối Mina -> Lily VIP..."))
 
         acquireCpuWakeLock()
+        VisbotMotorController.onFrontSensorPressed = { sensorId ->
+            Log.i(TAG, "Physical Visbot touch/button pressed ($sensorId) -> waking Lily VIP")
+            if (workerRunning.get()) {
+                manualWakeRequested.set(true)
+            } else {
+                triggerLilyConversation("Chạm nút thân máy ($sensorId)")
+            }
+        }
+        VisbotMotorController.init(applicationContext)
         mcpServer = MinaLocalMcpServer(applicationContext).also { it.start() }
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -192,6 +224,22 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                     manualWakeRequested.set(true)
                 } else {
                     triggerLilyConversation("Nút gọi trực tiếp")
+                }
+            }
+            ACTION_MOTOR_CMD -> {
+                if (!VisbotMotorController.isInitialized) {
+                    VisbotMotorController.init(applicationContext)
+                }
+                val mv = intent.getStringExtra("move")
+                val hd = intent.getStringExtra("head")
+                val dur = intent.getLongExtra("durationMs", 1100L)
+                if (!mv.isNullOrEmpty()) {
+                    val res = VisbotMotorController.move(mv, dur)
+                    Log.i(TAG, "ACTION_MOTOR_CMD move($mv) -> $res")
+                }
+                if (!hd.isNullOrEmpty()) {
+                    val res = VisbotMotorController.head(hd)
+                    Log.i(TAG, "ACTION_MOTOR_CMD head($hd) -> $res")
                 }
             }
             else -> {
@@ -660,10 +708,31 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
                 val kw = MinaKwsNative.nativeAcceptAndDecode(kwsHandle, data, data.size).trim()
                 if (kw.isNotEmpty()) {
                     Log.i(TAG, "WAKE KEYWORD SPOTTED: $kw")
+                    val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+
                     if (kw.contains("dừng_lại", ignoreCase = true)) {
+                        VisbotMotorController.stop()
                         mcpServer?.stopRadio()
-                        val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-                        lastTriggerInfo = "$kw ($ts) -> Đã dừng phát media"
+                        lastTriggerInfo = "$kw ($ts) -> Đã dừng bánh xe & media"
+                        broadcastUiUpdate()
+                        continue
+                    }
+
+                    // Khẩu lệnh điều khiển chuyển động Offline tức thì (< 100ms, không cần mạng)
+                    if (kw.startsWith("@Motor_", ignoreCase = true)) {
+                        if (!VisbotMotorController.isInitialized) {
+                            VisbotMotorController.init(applicationContext)
+                        }
+                        val actDesc = when (kw) {
+                            "@Motor_Forward" -> VisbotMotorController.move("forward", 1300L)
+                            "@Motor_Backward" -> VisbotMotorController.move("backward", 1300L)
+                            "@Motor_Left" -> VisbotMotorController.move("turn_left", 950L)
+                            "@Motor_Right" -> VisbotMotorController.move("turn_right", 950L)
+                            "@Motor_Nod" -> VisbotMotorController.head("nod")
+                            "@Motor_Dance" -> VisbotMotorController.dance()
+                            else -> "Đã nhận $kw"
+                        }
+                        lastTriggerInfo = "$kw ($ts) -> $actDesc"
                         broadcastUiUpdate()
                         continue
                     }
@@ -710,6 +779,17 @@ M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
         }
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_NOD_ON_WAKE, true)) {
+            mainHandler.post {
+                try {
+                    if (!VisbotMotorController.isInitialized) {
+                        VisbotMotorController.init(applicationContext)
+                    }
+                    VisbotMotorController.head("nod")
+                } catch (_: Throwable) {
+                }
+            }
+        }
         if (prefs.getBoolean(KEY_PLAY_BEEP, true)) {
             try {
                 val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)

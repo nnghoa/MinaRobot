@@ -297,6 +297,42 @@ class MinaLocalMcpServer(private val appContext: Context) {
                         )
                 )
         )
+        arr.put(
+            JSONObject()
+                .put("name", "mina_visbot_move")
+                .put("description", "Điều khiển bánh xe robot Visbot di chuyển: forward (tiến), backward (lùi), turn_left (quay trái), turn_right (quay phải), stop (dừng)")
+                .put(
+                    "inputSchema",
+                    JSONObject()
+                        .put("type", "object")
+                        .put(
+                            "properties",
+                            JSONObject()
+                                .put("direction", JSONObject().put("type", "string").put("description", "forward, backward, turn_left, turn_right, stop"))
+                                .put("durationMs", JSONObject().put("type", "integer").put("description", "Thời gian chạy mili-giây (200..5000, mặc định 1200)"))
+                        )
+                )
+        )
+        arr.put(
+            JSONObject()
+                .put("name", "mina_visbot_head")
+                .put("description", "Điều khiển đầu/cổ robot Visbot: nod (gật đầu), up (ngẩng lên), down (cúi xuống), center (nhìn thẳng)")
+                .put(
+                    "inputSchema",
+                    JSONObject()
+                        .put("type", "object")
+                        .put(
+                            "properties",
+                            JSONObject().put("action", JSONObject().put("type", "string").put("description", "nod, up, down, center"))
+                        )
+                )
+        )
+        arr.put(
+            JSONObject()
+                .put("name", "mina_visbot_dance")
+                .put("description", "Cho robot Visbot nhảy múa vui nhộn kết hợp xoay bánh xe và gật đầu")
+                .put("inputSchema", JSONObject().put("type", "object").put("properties", JSONObject()))
+        )
         return arr
     }
 
@@ -306,6 +342,18 @@ class MinaLocalMcpServer(private val appContext: Context) {
             "mina_stop_radio" -> stopRadio()
             "mina_robot_status" -> readRobotStatus()
             "mina_open_app" -> openRobotApp(args.optString("app", ""))
+            "mina_visbot_move" -> {
+                if (!VisbotMotorController.isInitialized) VisbotMotorController.init(appContext)
+                VisbotMotorController.move(args.optString("direction", "forward"), args.optLong("durationMs", 1200L))
+            }
+            "mina_visbot_head" -> {
+                if (!VisbotMotorController.isInitialized) VisbotMotorController.init(appContext)
+                VisbotMotorController.head(args.optString("action", "nod"))
+            }
+            "mina_visbot_dance" -> {
+                if (!VisbotMotorController.isInitialized) VisbotMotorController.init(appContext)
+                VisbotMotorController.dance()
+            }
             else -> "Không nhận diện được công cụ $name"
         }
     }

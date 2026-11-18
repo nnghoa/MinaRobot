@@ -46,7 +46,7 @@ Java_com_mtc_minalilybridge_MinaKwsNative_nativeCreate(
     config.model_config.debug = 0;
 
     config.max_active_paths = 4;
-    config.num_trailing_blanks = 1;
+    config.num_trailing_blanks = 2;
     config.keywords_score = keywordsScore;
     config.keywords_threshold = keywordsThreshold;
     config.keywords_file = keywords;

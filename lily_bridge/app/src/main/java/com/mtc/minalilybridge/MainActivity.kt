@@ -106,8 +106,12 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun sendServiceAction(action: String) {
-        val svc = Intent(this, MinaBridgeService::class.java).setAction(action)
+    private fun sendServiceAction(action: String, move: String? = null, head: String? = null, durationMs: Long = 1000L) {
+        val svc = Intent(this, MinaBridgeService::class.java).setAction(action).apply {
+            if (move != null) putExtra("move", move)
+            if (head != null) putExtra("head", head)
+            putExtra("durationMs", durationMs)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(svc)
         } else {
@@ -242,6 +246,74 @@ class MainActivity : Activity() {
             }
         )
 
+        // 3b. Bảng điều khiển nhanh Bánh xe & Gật đầu (UBTECH ROSA)
+        val tvMotorLabel = TextView(this).apply {
+            text = "Điều khiển Bánh xe & Đầu (ROSA):"
+            textSize = 10.5f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.parseColor("#1E293B"))
+        }
+        root.addView(
+            tvMotorLabel,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            }
+        )
+
+        fun motorBtn(label: String, bgHex: String, onClick: () -> Unit): Button {
+            return Button(this).apply {
+                text = label
+                textSize = 9.5f
+                isAllCaps = false
+                setTextColor(Color.WHITE)
+                background = roundedBg(Color.parseColor(bgHex), radiusDp = 6)
+                setOnClickListener { onClick() }
+            }
+        }
+
+        val rowMotor1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val motorRow1Items = listOf(
+            Triple("Tiến", "#0284C7") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, move = "forward", durationMs = 1000L) },
+            Triple("Lùi", "#0284C7") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, move = "backward", durationMs = 1000L) },
+            Triple("Trái", "#0369A1") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, move = "turn_left", durationMs = 900L) },
+            Triple("Phải", "#0369A1") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, move = "turn_right", durationMs = 900L) }
+        )
+        for ((idx, itm) in motorRow1Items.withIndex()) {
+            rowMotor1.addView(
+                motorBtn(itm.first, itm.second, itm.third),
+                LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+                    if (idx < motorRow1Items.size - 1) rightMargin = dp(4)
+                }
+            )
+        }
+        root.addView(
+            rowMotor1,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(3)
+            }
+        )
+
+        val rowMotor2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val motorRow2Items = listOf(
+            Triple("Gật đầu", "#7C3AED") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, head = "nod") },
+            Triple("Nhảy múa", "#9333EA") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, move = "dance") },
+            Triple("Dừng", "#DC2626") { sendServiceAction(MinaBridgeService.ACTION_MOTOR_CMD, move = "stop") }
+        )
+        for ((idx, itm) in motorRow2Items.withIndex()) {
+            rowMotor2.addView(
+                motorBtn(itm.first, itm.second, itm.third),
+                LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+                    if (idx < motorRow2Items.size - 1) rightMargin = dp(4)
+                }
+            )
+        }
+        root.addView(
+            rowMotor2,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(4)
+            }
+        )
+
         // 4. Chọn độ nhạy nhận diện từ khóa
         val tvSensLabel = TextView(this).apply {
             text = "Độ nhạy câu gọi \"Mina ơi\":"
@@ -316,6 +388,16 @@ class MainActivity : Activity() {
             }
         }
         root.addView(cbBeep)
+
+        val cbNod = CheckBox(this).apply {
+            text = "Tự động gật đầu chào khi nghe gọi \"Mina\""
+            textSize = 10.5f
+            isChecked = prefs.getBoolean(MinaBridgeService.KEY_NOD_ON_WAKE, true)
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean(MinaBridgeService.KEY_NOD_ON_WAKE, checked).apply()
+            }
+        }
+        root.addView(cbNod)
 
         // 6. Trình sửa nhanh file keywords.txt (Open-Vocabulary Phonemes)
         val tvKwLabel = TextView(this).apply {
