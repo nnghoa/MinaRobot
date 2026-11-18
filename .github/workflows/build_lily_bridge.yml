@@ -1,0 +1,49 @@
+name: Build Mina Lily Bridge APK
+
+on:
+  push:
+    paths:
+      - 'lily_bridge/**'
+      - '.github/workflows/build_lily_bridge.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-lily-bridge:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Pure Native Release APK (armeabi-v7a)
+        run: |
+          gradle -p lily_bridge assembleRelease --no-daemon --stacktrace
+          cp lily_bridge/app/build/outputs/apk/release/app-release.apk Mina_Lily_Bridge_v1.0.0_release.apk
+          ls -lh Mina_Lily_Bridge_v1.0.0_release.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mina_Lily_Bridge_v1.0.0_release
+          path: Mina_Lily_Bridge_v1.0.0_release.apk
+
+      - name: Publish Release Asset for Direct Download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lily-bridge-v1.0.0
+          name: "Mina Lily Bridge v1.0.0 (Wake 'Mina ơi' + MCP for Lily VIP)"
+          files: Mina_Lily_Bridge_v1.0.0_release.apk
+          prerelease: false

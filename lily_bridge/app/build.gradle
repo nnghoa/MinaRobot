@@ -1,0 +1,72 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+}
+
+android {
+    namespace = "com.mtc.minalilybridge"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.mtc.mina_lily_bridge"
+        minSdk = 24
+        targetSdk = 33
+        versionCode = 1
+        versionName = "1.0.0"
+
+        ndk {
+            abiFilters "armeabi-v7a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=none"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+
+    sourceSets {
+        main {
+            // Tái sử dụng trực tiếp thư viện armeabi-v7a và model KWS 5.45MB có sẵn trong MinaRobot
+            jniLibs.srcDirs = ["../../android/app/src/main/jniLibs"]
+            assets.srcDirs = ["../../assets"]
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += [
+                "**/libopus.so",
+                "**/librobot_serial.so"
+            ]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.debug
+            minifyEnabled = false
+            shrinkResources = false
+        }
+    }
+}
+
+dependencies {
+    // 100% Pure Android SDK + Kotlin stdlib (siêu nhẹ ~18MB RAM cho Visbot MT8167S 1GB RAM)
+}
