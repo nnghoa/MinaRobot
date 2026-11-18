@@ -121,6 +121,14 @@ Java_com_mtc_minalilybridge_MinaKwsNative_nativeAcceptAndDecode(
 
     const SherpaOnnxKeywordResult *res = SherpaOnnxGetKeywordResult(h->spotter, h->stream);
     jstring jOut;
+    if (res && res->tokens && res->tokens[0] != '\0') {
+        static char lastTokens[256] = {0};
+        if (strncmp(lastTokens, res->tokens, sizeof(lastTokens) - 1) != 0) {
+            strncpy(lastTokens, res->tokens, sizeof(lastTokens) - 1);
+            lastTokens[sizeof(lastTokens) - 1] = '\0';
+            LOGI("Hearing phonemes: [%s]", lastTokens);
+        }
+    }
     if (res && res->keyword && res->keyword[0] != '\0') {
         LOGI("Detected keyword: %s", res->keyword);
         jOut = (*env)->NewStringUTF(env, res->keyword);

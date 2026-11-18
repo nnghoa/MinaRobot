@@ -35,6 +35,7 @@ class MinaBridgeService : Service() {
         private const val TAG = "MinaBridgeSvc"
         private const val NOTIF_CHANNEL_ID = "mina_lily_bridge_channel"
         private const val NOTIF_ID = 1808
+        private const val CURRENT_KW_SCHEMA_VERSION = 2
 
         const val PREFS_NAME = "mina_lily_bridge_prefs"
         const val KEY_ENABLED = "listening_enabled"
@@ -42,6 +43,7 @@ class MinaBridgeService : Service() {
         const val KEY_SCORE = "kws_score"
         const val KEY_AUTO_BOOT = "auto_boot"
         const val KEY_PLAY_BEEP = "play_beep"
+        const val KEY_KW_SCHEMA_VER = "kw_schema_ver"
 
         const val ACTION_START_LISTENING = "com.mtc.mina_lily_bridge.START_LISTENING"
         const val ACTION_PAUSE_LISTENING = "com.mtc.mina_lily_bridge.PAUSE_LISTENING"
@@ -57,6 +59,58 @@ class MinaBridgeService : Service() {
         const val STATE_LISTENING = "LISTENING"
         const val STATE_YIELDED = "YIELDED"
         const val STATE_ERROR = "ERROR"
+
+        // Bộ từ khóa mở rộng v2: Bao phủ đầy đủ "Hello Mina", "Hi Mina", "Hey Mina", "Xin chào Mina", "Chào Mina", "Mina ơi", "Mina"
+        val DEFAULT_KEYWORDS_V2 = """
+m ī n ā @Mina
+m í n á @Mina
+m ì n à @Mina
+m ī n a @Mina
+m í n a @Mina
+m i n a @Mina
+m ǐ n ǎ @Mina
+M IY1 N AA0 @Mina
+M IY1 N AH0 @Mina
+M IY0 N AA0 @Mina
+M IH1 N AH0 @Mina
+M IH0 N AH0 @Mina
+HH AH0 L OW1 M IY1 N AA0 @Hello_Mina
+HH EH0 L OW1 M IY1 N AA0 @Hello_Mina
+HH AH0 L OW1 M IY1 N AH0 @Hello_Mina
+HH EH0 L OW1 M IY1 N AH0 @Hello_Mina
+HH EY1 L OW1 M IY1 N AA0 @Hello_Mina
+HH EY1 L OW1 M IY1 N AH0 @Hello_Mina
+HH EH1 L OW0 M IY1 N AA0 @Hello_Mina
+HH EH1 L OW0 M IY1 N AH0 @Hello_Mina
+h ā l ōu m ī n ā @Hello_Mina
+h ēi l ōu m ī n ā @Hello_Mina
+h é l ōu m ī n ā @Hello_Mina
+h è l ōu m ī n ā @Hello_Mina
+HH AY1 M IY1 N AA0 @Hi_Mina
+HH AY1 M IY1 N AH0 @Hi_Mina
+h āi m ī n ā @Hi_Mina
+x īn ch áo m ī n ā @Xin_chào_Mina
+x īn ch ào m ī n ā @Xin_chào_Mina
+S IH1 N CH AW1 M IY1 N AA0 @Xin_chào_Mina
+ch áo m ī n ā @Chào_Mina
+ch áo m í n a @Chào_Mina
+ch ào m ī n ā @Chào_Mina
+q iáo m ī n ā @Chào_Mina
+x iǎo m ī n ā @Chào_Mina
+CH AW1 M IY1 N AA0 @Chào_Mina
+CH AW1 M IY1 N AH0 @Chào_Mina
+HH EY1 M IY1 N AA0 @Hey_Mina
+HH EY1 M IY1 N AH0 @Hey_Mina
+h ēi m ī n ā @Hey_Mina
+m ī n ā ēi @Mina_ơi
+m í n a āi @Mina_ơi
+M IY1 N AA0 ER1 @Mina_ơi
+M IY1 N AH0 OY1 @Mina_ơi
+m ī n ā y íng l ài @Mina_dừng_lại
+m ī n ā r éng l ài @Mina_dừng_lại
+M IY1 N AA0 Z IH1 NG L AY1 @Mina_dừng_lại
+M IY1 N AA0 Y IH1 NG L AY1 @Mina_dừng_lại
+""".trimIndent() + "\n"
 
         @Volatile
         var currentState: String = STATE_PAUSED
@@ -87,8 +141,9 @@ class MinaBridgeService : Service() {
     @Volatile
     private var forceYieldUntilMs: Long = 0L
 
-    private var workerThread: Thread? = null
+    private var orchestratorThread: Thread? = null
     private var mcpServer: MinaLocalMcpServer? = null
+    private var cpuWakeLock: PowerManager.WakeLock? = null
     private lateinit var audioManager: AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -98,6 +153,7 @@ class MinaBridgeService : Service() {
         createNotificationChannel()
         startForeground(NOTIF_ID, buildNotification("Đang khởi tạo cầu nối Mina -> Lily VIP..."))
 
+        acquireCpuWakeLock()
         mcpServer = MinaLocalMcpServer(applicationContext).also { it.start() }
 
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -114,7 +170,7 @@ class MinaBridgeService : Service() {
             ACTION_PAUSE_LISTENING -> {
                 prefs.edit().putBoolean(KEY_ENABLED, false).apply()
                 stopWorker()
-                updateState(STATE_PAUSED, "Đã tạm dừng nghe \"Mina ơi\" (Mic nhường hoàn toàn)")
+                updateState(STATE_PAUSED, "Đã tạm dừng nghe (Mic nhường hoàn toàn)")
             }
             ACTION_START_LISTENING -> {
                 prefs.edit().putBoolean(KEY_ENABLED, true).apply()
@@ -151,40 +207,59 @@ class MinaBridgeService : Service() {
         stopWorker()
         mcpServer?.stop()
         mcpServer = null
+        releaseCpuWakeLock()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun acquireCpuWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "mina_lily_bridge:kws_cpu").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun releaseCpuWakeLock() {
+        try {
+            if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release()
+        } catch (_: Throwable) {
+        }
+        cpuWakeLock = null
+    }
+
     private fun startWorkerIfNeeded() {
         if (workerRunning.getAndSet(true)) return
-        val t = Thread({ runAudioLoop() }, "MinaKwsAudioLoop")
-        workerThread = t
+        val t = Thread({ runOrchestratorLoop() }, "MinaKwsOrchestrator")
+        orchestratorThread = t
         t.start()
     }
 
     private fun stopWorker() {
         workerRunning.set(false)
-        workerThread?.interrupt()
+        orchestratorThread?.interrupt()
         try {
-            workerThread?.join(1200)
+            orchestratorThread?.join(1500)
         } catch (_: Throwable) {
         }
-        workerThread = null
+        orchestratorThread = null
     }
 
     private fun ensureModelsExtracted(): File {
         val modelDir = File(filesDir, "mina_kws")
         if (!modelDir.exists()) modelDir.mkdirs()
 
-        val assetNames = listOf(
+        val binaryAssets = listOf(
             "encoder.int8.onnx",
             "decoder.onnx",
             "joiner.int8.onnx",
-            "tokens.txt",
-            "keywords.txt"
+            "tokens.txt"
         )
-        for (name in assetNames) {
+        for (name in binaryAssets) {
             val dst = File(modelDir, name)
             if (!dst.exists() || dst.length() == 0L) {
                 assets.open("models/kws/$name").use { input ->
@@ -195,13 +270,26 @@ class MinaBridgeService : Service() {
                 }
             }
         }
+
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedVer = prefs.getInt(KEY_KW_SCHEMA_VER, 0)
+        val kwFile = File(modelDir, "keywords.txt")
+        if (!kwFile.exists() || kwFile.length() == 0L || savedVer < CURRENT_KW_SCHEMA_VERSION) {
+            kwFile.writeText(DEFAULT_KEYWORDS_V2, Charsets.UTF_8)
+            prefs.edit()
+                .putInt(KEY_KW_SCHEMA_VER, CURRENT_KW_SCHEMA_VERSION)
+                .putFloat(KEY_SCORE, 1.8f)
+                .putFloat(KEY_THRESHOLD, 0.15f)
+                .apply()
+            Log.i(TAG, "Upgraded keywords.txt to v$CURRENT_KW_SCHEMA_VERSION (Hello Mina + 0.15 threshold)")
+        }
         return modelDir
     }
 
     private fun createSpotterFromPrefs(modelDir: File): Long {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val score = prefs.getFloat(KEY_SCORE, 1.5f)
-        val threshold = prefs.getFloat(KEY_THRESHOLD, 0.20f)
+        val score = prefs.getFloat(KEY_SCORE, 1.8f)
+        val threshold = prefs.getFloat(KEY_THRESHOLD, 0.15f)
         return MinaKwsNative.nativeCreate(
             File(modelDir, "encoder.int8.onnx").absolutePath,
             File(modelDir, "decoder.onnx").absolutePath,
@@ -231,16 +319,29 @@ class MinaBridgeService : Service() {
             AudioFormat.ENCODING_PCM_16BIT
         )
         if (minBuf <= 0) return Triple(null, null, null)
-        val bufSize = (minBuf * 2).coerceAtLeast(16000 * 2) // >= 1s ring buffer
+        // Bộ đệm 64KB (~2 giây PCM16 @ 16kHz) đảm bảo AudioFlinger trên MT8167S không bao giờ tràn bộ đệm
+        val bufSize = (minBuf * 8).coerceAtLeast(65536)
 
         return try {
-            val rec = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufSize
-            )
+            // Ưu tiên AudioSource.MIC (source=1) giống hệt Lily & Mina_Visbot để kích hoạt mạch khuếch đại Mic phần cứng
+            val rec = try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize
+                )
+            } catch (_: Throwable) {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize
+                )
+            }
+
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
                 rec.release()
                 return Triple(null, null, null)
@@ -266,6 +367,7 @@ class MinaBridgeService : Service() {
                 rec.release()
                 return Triple(null, null, null)
             }
+            Log.i(TAG, "Opened MIC (session=${rec.audioSessionId}, buf=$bufSize)")
             Triple(rec, aec, ns)
         } catch (e: Throwable) {
             Log.e(TAG, "openMic failed: ${e.message}")
@@ -290,9 +392,13 @@ class MinaBridgeService : Service() {
         }
     }
 
-    private fun runAudioLoop() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
-
+    /**
+     * Kiến trúc Tách Kép 2 Luồng (Zero Buffer-Overflow):
+     * - Luồng 1 (MicReaderThread - URGENT_AUDIO): Chỉ đọc AudioRecord.read() liên tục mỗi 60ms và đẩy vào hàng đợi vòng,
+     *   tuyệt đối không chờ ONNX nên không bao giờ bị mất âm tiết ("RecordThread: buffer overflow").
+     * - Luồng 2 (Orchestrator / KWS Decode): Lấy lô mẫu từ hàng đợi, chạy Sherpa-ONNX và quản lý chuyển giao Mic với Lily VIP.
+     */
+    private fun runOrchestratorLoop() {
         if (!MinaKwsNative.isLoaded) {
             updateState(STATE_ERROR, "Lỗi nạp thư viện Sherpa-ONNX: ${MinaKwsNative.loadError}")
             workerRunning.set(false)
@@ -314,25 +420,133 @@ class MinaBridgeService : Service() {
             return
         }
 
+        // Hàng đợi mẫu PCM giữa MicReaderThread và KwsDecodeThread (tối đa 6400 mẫu = 400ms)
+        val queueLock = Object()
+        val maxQueueSamples = 6400
+        val sampleQueue = ShortArray(maxQueueSamples)
+        var queueLen = 0
+        val micThreadActive = AtomicBoolean(false)
+        val micSilencedBySystem = AtomicBoolean(false)
+        var micReaderThread: Thread? = null
+
         var audioRecord: AudioRecord? = null
         var aec: AcousticEchoCanceler? = null
         var ns: NoiseSuppressor? = null
+
+        fun stopActiveCapture() {
+            micThreadActive.set(false)
+            synchronized(queueLock) {
+                queueLen = 0
+                queueLock.notifyAll()
+            }
+            closeMic(audioRecord, aec, ns)
+            try {
+                micReaderThread?.join(400)
+            } catch (_: Throwable) {
+            }
+            micReaderThread = null
+            audioRecord = null
+            aec = null
+            ns = null
+            lastPeakLevel = 0
+        }
+
+        fun startActiveCapture(): Boolean {
+            val opened = openMic()
+            val rec = opened.first ?: return false
+            audioRecord = rec
+            aec = opened.second
+            ns = opened.third
+            micSilencedBySystem.set(false)
+            synchronized(queueLock) {
+                queueLen = 0
+            }
+            micThreadActive.set(true)
+
+            val reader = Thread({
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+                val frame = ShortArray(960) // 60ms @ 16kHz
+                var silentFrames = 0
+                var exactZeroFrames = 0
+
+                while (micThreadActive.get() && workerRunning.get()) {
+                    val n = try {
+                        rec.read(frame, 0, frame.size)
+                    } catch (_: Throwable) {
+                        -1
+                    }
+                    if (n <= 0) {
+                        if (!micThreadActive.get()) break
+                        Thread.sleep(20)
+                        continue
+                    }
+
+                    var rawMax = 0
+                    for (i in 0 until n step 2) {
+                        val v = kotlin.math.abs(frame[i].toInt())
+                        if (v > rawMax) rawMax = v
+                    }
+
+                    if (rawMax == 0) {
+                        exactZeroFrames++
+                        if (exactZeroFrames > 25) {
+                            micSilencedBySystem.set(true)
+                            synchronized(queueLock) { queueLock.notifyAll() }
+                            break
+                        }
+                    } else {
+                        exactZeroFrames = 0
+                    }
+
+                    // Khuếch đại phần mềm ×2.2 (có kẹp bão hòa mềm) giúp bắt nhạy câu gọi từ khoảng cách 1–3m trên Visbot
+                    var boostedMax = 0
+                    for (i in 0 until n) {
+                        val boosted = (frame[i].toInt() * 22) / 10
+                        val clamped = boosted.coerceIn(-32768, 32767)
+                        frame[i] = clamped.toShort()
+                        val absV = kotlin.math.abs(clamped)
+                        if (absV > boostedMax) boostedMax = absV
+                    }
+                    lastPeakLevel = boostedMax
+
+                    if (boostedMax < 160) {
+                        silentFrames++
+                        if (silentFrames > 28) {
+                            // Im lặng > 1.7s -> nghỉ đẩy vào ONNX để CPU = 0%
+                            continue
+                        }
+                    } else {
+                        silentFrames = 0
+                    }
+
+                    synchronized(queueLock) {
+                        if (queueLen + n > maxQueueSamples) {
+                            val drop = (queueLen + n) - maxQueueSamples
+                            System.arraycopy(sampleQueue, drop, sampleQueue, 0, queueLen - drop)
+                            queueLen -= drop
+                        }
+                        System.arraycopy(frame, 0, sampleQueue, queueLen, n)
+                        queueLen += n
+                        queueLock.notifyAll()
+                    }
+                }
+            }, "MinaMicUrgentReader")
+            micReaderThread = reader
+            reader.start()
+            return true
+        }
 
         var yielded = false
         var yieldGraceUntilMs = 0L
         var seenExternalRecorderDuringYield = false
         var externalSilentSinceMs = 0L
-
-        var silentFrames = 0
-        var exactZeroFrames = 0
-        var frameCounter = 0
-        val pcmBuf = ShortArray(960) // 60ms @ 16kHz
+        var checkExtCounter = 0
 
         try {
             while (workerRunning.get()) {
                 val now = System.currentTimeMillis()
 
-                // 1. Nạp lại cấu hình độ nhạy / từ khóa nếu người dùng vừa chỉnh trong UI
+                // 1. Nạp lại cấu hình độ nhạy / từ khóa nếu vừa chỉnh
                 if (reloadRequested.getAndSet(false)) {
                     MinaKwsNative.nativeDestroy(kwsHandle)
                     kwsHandle = createSpotterFromPrefs(modelDir)
@@ -342,11 +556,9 @@ class MinaBridgeService : Service() {
                     }
                 }
 
-                // 2. Xử lý yêu cầu gọi Lily thủ công (từ nút test hoặc phím cứng)
+                // 2. Yêu cầu gọi Lily thủ công
                 if (manualWakeRequested.getAndSet(false)) {
-                    closeMic(audioRecord, aec, ns)
-                    audioRecord = null; aec = null; ns = null
-                    lastPeakLevel = 0
+                    stopActiveCapture()
                     yielded = true
                     seenExternalRecorderDuringYield = false
                     externalSilentSinceMs = 0L
@@ -356,13 +568,9 @@ class MinaBridgeService : Service() {
                     continue
                 }
 
-                // 3. Kiểm tra nhường Mic 30s thủ công từ thanh thông báo
+                // 3. Tạm nhường Mic 30s từ thông báo
                 if (now < forceYieldUntilMs) {
-                    if (audioRecord != null) {
-                        closeMic(audioRecord, aec, ns)
-                        audioRecord = null; aec = null; ns = null
-                        lastPeakLevel = 0
-                    }
+                    if (audioRecord != null) stopActiveCapture()
                     val remSec = ((forceYieldUntilMs - now) / 1000L).coerceAtLeast(1L)
                     updateState(STATE_YIELDED, "Đang tạm nhường Mic (${remSec}s)...")
                     Thread.sleep(500)
@@ -378,14 +586,12 @@ class MinaBridgeService : Service() {
                         updateState(STATE_YIELDED, "Lily VIP đang giữ Mic đàm thoại...")
                     } else {
                         if (now < yieldGraceUntilMs && !seenExternalRecorderDuringYield) {
-                            // Đang trong 7.5s đầu chờ Lily mở kết nối mạng và lấy Mic
                             Thread.sleep(350)
                             continue
                         }
                         if (externalSilentSinceMs == 0L) {
                             externalSilentSinceMs = now
                         } else if (now - externalSilentSinceMs >= 2600L) {
-                            // Lily đã ngắt phiên thoại và trả Mic >= 2.6 giây -> Mina nhận lại Mic!
                             yielded = false
                             seenExternalRecorderDuringYield = false
                             externalSilentSinceMs = 0L
@@ -398,7 +604,7 @@ class MinaBridgeService : Service() {
                     continue
                 }
 
-                // 5. Trước khi mở Mic hoặc định kỳ kiểm tra xem Lily có đang tự thu âm không
+                // 5. Đảm bảo luồng đọc Mic đang chạy
                 if (audioRecord == null) {
                     if (hasExternalRecorder(-1)) {
                         yielded = true
@@ -408,27 +614,29 @@ class MinaBridgeService : Service() {
                         Thread.sleep(500)
                         continue
                     }
-                    val opened = openMic()
-                    audioRecord = opened.first
-                    aec = opened.second
-                    ns = opened.third
-                    if (audioRecord == null) {
-                        updateState(STATE_YIELDED, "Mic đang bận bởi ứng dụng khác, chờ 2s...")
+                    if (!startActiveCapture()) {
+                        updateState(STATE_YIELDED, "Mic đang bận, chờ 2s...")
                         Thread.sleep(1800)
                         continue
                     }
-                    silentFrames = 0
-                    exactZeroFrames = 0
                     MinaKwsNative.nativeReset(kwsHandle)
-                    updateState(STATE_LISTENING, "Đang nghe Offline: \"Mina\", \"Chào Mina\", \"Mina ơi\"")
+                    updateState(STATE_LISTENING, "Đang nghe: \"Hello Mina\", \"Chào Mina\", \"Mina ơi\"")
                 }
 
-                // Kiểm tra nhanh mỗi ~0.5s xem có app khác vừa mở AudioRecord song song không
-                frameCounter++
-                if (frameCounter % 8 == 0 && hasExternalRecorder(audioRecord.audioSessionId)) {
-                    closeMic(audioRecord, aec, ns)
-                    audioRecord = null; aec = null; ns = null
-                    lastPeakLevel = 0
+                if (micSilencedBySystem.getAndSet(false)) {
+                    stopActiveCapture()
+                    yielded = true
+                    seenExternalRecorderDuringYield = false
+                    externalSilentSinceMs = 0L
+                    yieldGraceUntilMs = System.currentTimeMillis() + 5000L
+                    updateState(STATE_YIELDED, "Nhường Mic cho ứng dụng tiền cảnh...")
+                    continue
+                }
+
+                checkExtCounter++
+                val curRec = audioRecord
+                if (curRec != null && checkExtCounter % 6 == 0 && hasExternalRecorder(curRec.audioSessionId)) {
+                    stopActiveCapture()
                     yielded = true
                     seenExternalRecorderDuringYield = true
                     externalSilentSinceMs = 0L
@@ -436,52 +644,20 @@ class MinaBridgeService : Service() {
                     continue
                 }
 
-                val readCount = audioRecord.read(pcmBuf, 0, pcmBuf.size)
-                if (readCount <= 0) {
-                    closeMic(audioRecord, aec, ns)
-                    audioRecord = null; aec = null; ns = null
-                    Thread.sleep(500)
-                    continue
-                }
-
-                // Đo biên độ đỉnh để chạy Silence Gate (0% CPU khi phòng yên tĩnh) & phát hiện bị tắt tiếng
-                var maxAbs = 0
-                var i = 0
-                while (i < readCount) {
-                    val v = kotlin.math.abs(pcmBuf[i].toInt())
-                    if (v > maxAbs) maxAbs = v
-                    i += 4
-                }
-                lastPeakLevel = maxAbs
-
-                if (maxAbs == 0) {
-                    exactZeroFrames++
-                    if (exactZeroFrames > 20) {
-                        // Android AudioFlinger trả về toàn 0 khi một app tiền cảnh khác lấy quyền Mic
-                        closeMic(audioRecord, aec, ns)
-                        audioRecord = null; aec = null; ns = null
-                        yielded = true
-                        seenExternalRecorderDuringYield = false
-                        externalSilentSinceMs = 0L
-                        yieldGraceUntilMs = System.currentTimeMillis() + 5000L
-                        updateState(STATE_YIELDED, "Phát hiện ứng dụng khác yêu cầu Mic, đang nhường...")
-                        continue
+                // 6. Chờ lấy lô mẫu âm thanh từ hàng đợi mà không giữ khóa khi giải mã ONNX
+                var chunk: ShortArray? = null
+                synchronized(queueLock) {
+                    if (queueLen == 0 && workerRunning.get() && !manualWakeRequested.get() && !reloadRequested.get()) {
+                        queueLock.wait(300)
                     }
-                } else {
-                    exactZeroFrames = 0
-                }
-
-                if (maxAbs < 130) {
-                    silentFrames++
-                    if (silentFrames > 25) {
-                        // Phòng yên lặng > 1.5s -> bỏ qua suy luận ONNX để CPU = 0%
-                        continue
+                    if (queueLen > 0) {
+                        chunk = sampleQueue.copyOfRange(0, queueLen)
+                        queueLen = 0
                     }
-                } else {
-                    silentFrames = 0
                 }
 
-                val kw = MinaKwsNative.nativeAcceptAndDecode(kwsHandle, pcmBuf, readCount).trim()
+                val data = chunk ?: continue
+                val kw = MinaKwsNative.nativeAcceptAndDecode(kwsHandle, data, data.size).trim()
                 if (kw.isNotEmpty()) {
                     Log.i(TAG, "WAKE KEYWORD SPOTTED: $kw")
                     if (kw.contains("dừng_lại", ignoreCase = true)) {
@@ -493,9 +669,7 @@ class MinaBridgeService : Service() {
                     }
 
                     // NHẢ MIC TỨC THÌ (< 5ms) TRƯỚC KHI GỌI LILY VIP!
-                    closeMic(audioRecord, aec, ns)
-                    audioRecord = null; aec = null; ns = null
-                    lastPeakLevel = 0
+                    stopActiveCapture()
                     mcpServer?.stopRadio()
 
                     yielded = true
@@ -509,10 +683,10 @@ class MinaBridgeService : Service() {
             }
         } catch (_: InterruptedException) {
         } catch (t: Throwable) {
-            Log.e(TAG, "Audio loop crashed: ${t.message}", t)
+            Log.e(TAG, "Orchestrator loop crashed: ${t.message}", t)
             updateState(STATE_ERROR, "Lỗi luồng âm thanh: ${t.message}")
         } finally {
-            closeMic(audioRecord, aec, ns)
+            stopActiveCapture()
             if (kwsHandle != 0L) {
                 MinaKwsNative.nativeDestroy(kwsHandle)
             }
@@ -525,7 +699,6 @@ class MinaBridgeService : Service() {
         val ts = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         lastTriggerInfo = "$reason lúc $ts"
 
-        // 1. Đánh thức màn hình nếu đang tắt
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             val wl = pm.newWakeLock(
@@ -536,20 +709,18 @@ class MinaBridgeService : Service() {
         } catch (_: Throwable) {
         }
 
-        // 2. Phát tiếng "ting" ngắn (70ms) báo hiệu đã nghe thấy "Mina ơi"
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (prefs.getBoolean(KEY_PLAY_BEEP, true)) {
             try {
-                val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 75)
-                tg.startTone(ToneGenerator.TONE_PROP_ACK, 75)
+                val tg = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
+                tg.startTone(ToneGenerator.TONE_PROP_ACK, 80)
                 mainHandler.postDelayed({
                     try { tg.release() } catch (_: Throwable) {}
-                }, 200L)
+                }, 220L)
             } catch (_: Throwable) {
             }
         }
 
-        // 3. Kích hoạt thẳng phiên nghe trực tuyến của Lily VIP bằng Intent chuẩn đã xác minh
         mainHandler.post {
             try {
                 val wakeIntent = Intent(LILY_WAKE_ACTION).apply {
@@ -602,7 +773,7 @@ class MinaBridgeService : Service() {
                 "Mina Bridge -> Lily VIP",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Lắng nghe từ khóa Mina ơi Offline và đánh thức Lily VIP"
+                description = "Lắng nghe từ khóa Mina Offline và đánh thức Lily VIP"
                 setShowBadge(false)
             }
             nm.createNotificationChannel(ch)
